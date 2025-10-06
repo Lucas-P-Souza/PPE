@@ -1,0 +1,133 @@
+/* style pour la fenêtre principale (dark slate, un peu plus clair) */
+#MainWindow {
+    background-color: #192332; /* ardoise sombre mais pas trop */
+}
+
+/* style pour le titre principal */
+#TitleLabel {
+    font-size: 40px;
+    font-weight: bold;
+    color: #e5e7eb; /* gris-100 */
+    margin: 10px 0 12px 0;
+}
+
+/* style pour le texte d'informations */
+#InfoLabel {
+    font-size: 16px;
+    color: #d1d5db; /* gris clair pour meilleure lisibilité */
+    font-style: italic;
+    margin: 12px;
+}
+
+/* conteneur visuel pour la corde (carte sombre) */
+#StringContainer {
+    background-color: #111a29; /* léger contraste avec la fenêtre principale */
+    border: 1px solid #3b4a5f; /* bord plus doux */
+    border-radius: 16px;
+}
+
+/* étiquette de statut */
+#StatusLabel {
+    font-size: 18px;
+    color: #38bdf8; /* sky-400 : accent moderne, moins néon */
+    font-weight: 600;
+    margin: 8px;
+}
+
+/* couleurs du CordeWidget contrôlées via qproperty */
+CordeWidget {
+    qproperty-stringColor:    #e5e7eb; /* gris clair : corde */
+    qproperty-fretColor:      #717784; /* gris moyen : frettes */
+    qproperty-nutColor:       #ffffff; /* sillet : léger accent */
+    qproperty-fretTextColor:  #d1d5db; /* numéros plus lisibles */
+    qproperty-cursorColor:    #38bdf8; /* accent principal : curseur */
+    qproperty-strikeCursorColor: #f59e0b; /* accent secondaire : attaque */
+}
+
+/* bouton des paramètres (coin supérieur droit) */
+#SettingsButton {
+    font-size: 22px;
+    font-weight: 700;
+    color: #d1d5db;
+    background-color: #131c2b;
+    border: 1px solid #3b4a5f;
+    border-radius: 12px;
+    padding: 6px 10px;
+}
+#SettingsButton:hover {
+    background-color: #172235;
+    border-color: #4a5c77;
+    color: #e5e7eb;
+}
+#SettingsButton:pressed {
+    background-color: #101827;
+}
+
+/* dialogue style carte : fond arrondi dans le conteneur translucide */
+#SettingsCard {
+    /* le conteneur du dialogue est translucide ; on stylise le contenu via un QWidget interne */
+}
+QDialog#SettingsCard > QWidget {
+    background-color: #131c2b; /* fond du card légèrement plus clair */
+    border: 1px solid #3b4a5f;
+    border-radius: 16px;
+}
+QDialog#SettingsCard QLabel {
+    color: #e5e7eb;
+    font-size: 16px;
+}
+QDialog#SettingsCard QPushButton {
+    background-color: #162236;
+    color: #d1d5db;
+    border: 1px solid #3b4a5f;
+    border-radius: 10px;
+    padding: 6px 12px;
+}
+QDialog#SettingsCard QPushButton:hover {
+    background-color: #1a2a42;
+    color: #e5e7eb;
+}
+QDialog#SettingsCard QPushButton:pressed {
+    background-color: #0f1828;
+}
+
+/* onglets modernes pour le dialogue */
+QDialog#SettingsCard QTabBar::tab {
+    background: transparent;
+    color: #cbd5e1;
+    padding: 8px 14px;
+    margin-right: 6px;
+}
+QDialog#SettingsCard QTabBar::tab:hover {
+    color: #e5e7eb;
+}
+QDialog#SettingsCard QTabBar::tab:selected {
+    color: #e5e7eb;
+    border-bottom: 2px solid #38bdf8; /* accent sous l'onglet actif */
+}
+QDialog#SettingsCard QTabWidget::pane {
+    border: none;
+    margin-top: 6px;
+}
+
+/* sliders modernes */
+QDialog#SettingsCard QSlider::groove:horizontal {
+    height: 6px;
+    background: #233146;
+    border-radius: 3px;
+}
+QDialog#SettingsCard QSlider::sub-page:horizontal {
+    background: #38bdf8;
+    border-radius: 3px;
+}
+QDialog#SettingsCard QSlider::handle:horizontal {
+    background: #38bdf8;
+    width: 16px;
+    height: 16px;
+    margin: -6px 0; /* centrer le handle sur la gorge */
+    border-radius: 8px;
+    border: 2px solid #ffffff22;
+}
+QDialog#SettingsCard QSlider::handle:horizontal:hover {
+    background: #5cc9fb;
+}
