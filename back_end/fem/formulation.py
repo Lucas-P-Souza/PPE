@@ -1,51 +1,80 @@
-"""Formulation FEM 1D (corde tendue) — prise en charge maillage uniforme ou non uniforme.
-
-Objectifs
----------
-Fournir des routines d'assemblage des matrices globales :
- - Masse   (M)
- - Raideur (K)
- - Amortissement de Rayleigh (C = α M + β K)
-
-Points clés
------------
-1. Deux cas de discrétisation traités par une API unifiée :
-    - Maillage uniforme : nombre de nœuds + longueur totale -> dx constant.
-    - Maillage non uniforme : vecteur explicite des longueurs élémentaires dx_i.
-2. Matrices locales (élément e de longueur dx_e) :
-        M_e = (μ * dx_e / 6) [[2, 1], [1, 2]]
-        K_e = (T / dx_e)     [[1, -1], [-1, 1]]
-   (On NE construit plus C par somme des C_e — la matrice d'amortissement globale
-    est formée APRÈS assemblage via C = α M + β K.)
-3. Assemblage additif standard sur les sous-blocs (i,i), (i,i+1), (i+1,i), (i+1,i+1).
-4. Conditions aux limites *fixes* optionnelles (nœuds 0 et N-1 bloqués) appliquées
-   directement à M et K (puis C est calculé ensuite).
-5. Calcul global de l'amortissement : C = α M + β K après (éventuelle) application des CL.
-6. Retour possible d'un dictionnaire de métadonnées (dx_min, dx_max, etc.).
-
-Conventions
------------
- - n_nodes = nombre total de nœuds.
- - n_elems = n_nodes - 1.
- - Indices d'éléments: e relie les nœuds e et e+1.
-
-Sécurité & Validation
----------------------
- - Tous les dx doivent être > 0.
- - n_nodes >= 2.
-
-API publique
-------------
- - assemble_system_matrices_nonuniform(dx_vector, ...)
- - assemble_system_matrices(n_nodes, length, ...)
- - assemble_mkc(uniform_length=None, n_nodes=None, dx_vector=None, ...)
-      -> Fait la déduction du mode automatiquement.
-"""
+# Formulation FEM 1D (corde tendue) — maillage uniforme et non uniforme
+#
+# Objectifs
+# ---------
+# Fournir des routines d'assemblage des matrices globales :
+#  - Masse   (M)
+#  - Raideur (K)
+#  - Amortissement de Rayleigh (C = α M + β K)
+#
+# Points clés
+# -----------
+# 1) Deux cas de discrétisation via une API unifiée :
+#    - Uniforme: n_nodes + longueur totale -> dx constant.
+#    - Non uniforme: vecteur dx_i explicite.
+# 2) Matrices locales (élément de longueur dx):
+#       M_e = (μ * dx / 6) [[2, 1], [1, 2]]
+#       K_e = (T / dx)     [[1, -1], [-1, 1]]
+#    La matrice d'amortissement globale N'EST PAS assemblée élément par élément; on fait
+#    C = α M + β K APRÈS l'assemblage global.
+# 3) Assemblage additif standard sur blocs (i,i), (i,i+1), (i+1,i), (i+1,i+1).
+# 4) CL fixes (extrémités bloquées) appliquées directement sur M/K; C est ensuite construit
+#    et reçoit bords annulés (sans diagonale =1) via _apply_fixed_bc_inplace_damping.
+# 5) α, β de Rayleigh sont déduits de 2 amortissements modaux cibles.
+# 6) Option de retourner des métadonnées (dx_min, dx_max, etc.).
+#
+# Conventions
+# -----------
+#  - n_nodes = nœuds totaux
+#  - n_elems = n_nodes - 1
+#  - l’élément e relie les nœuds e et e+1
+#
+# Sécurité & Validation
+# ---------------------
+#  - Tous les dx > 0
+#  - n_nodes >= 2
+#
+# API publique
+# ------------
+#  - assemble_system_matrices_nonuniform(dx_vector, ...)
+#  - assemble_system_matrices(n_nodes, length, ...)
+#  - assemble_mkc(...)
 
 from __future__ import annotations
 
 import numpy as np
 from typing import Sequence, Tuple, Dict, Any
+try:
+    # Preferred: package-relative import
+    from ..utils import debug as dbg  # type: ignore
+except Exception:
+    # Try absolute import; if it fails, add project root to sys.path and retry
+    try:
+        from digital_twin.back_end.utils import debug as dbg  # type: ignore
+    except Exception:
+        try:
+            import sys
+            from pathlib import Path
+            ROOT = Path(__file__).resolve().parents[3]  # repo root containing 'digital_twin'
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            from digital_twin.back_end.utils import debug as dbg  # type: ignore
+        except Exception:
+            # Fallback no-op shim to avoid crashes during direct execution
+            class _DbgNoOp:
+                @staticmethod
+                def is_enabled() -> bool: return False
+                @staticmethod
+                def dprint(*args, **kwargs): pass
+                @staticmethod
+                def section(*args, **kwargs): pass
+                @staticmethod
+                def matrix_stats(*args, **kwargs): pass
+                @staticmethod
+                def print_blocks(*args, **kwargs): pass
+                @staticmethod
+                def bc_edge_sums(*args, **kwargs): pass
+            dbg = _DbgNoOp()  # type: ignore
 
 # ---------------------------------------------------------------------------
 # __all__ : définit l'API publique du module (symbols exportés par `from .. import *`).
@@ -64,104 +93,68 @@ __all__ = [
     "rayleigh_damping",
 ]
 
-# ---------------------------------------------------------------------------
-# Debug controls (can be overridden in digital_twin.back_end.config)
-# ---------------------------------------------------------------------------
-try:
-    from .. import config as _cfg  # type: ignore
-    _DEBUG_RAYLEIGH: bool = bool(getattr(_cfg, "DEBUG_RAYLEIGH", True))
-    _DEBUG_RAYLEIGH_LEVEL: int = int(getattr(_cfg, "DEBUG_RAYLEIGH_LEVEL", 1))
-except Exception:
-    # Enabled by default per user request; set to False to silence
-    _DEBUG_RAYLEIGH = True
-    _DEBUG_RAYLEIGH_LEVEL = 1
+# Debug is centrally managed in digital_twin.back_end.utils.debug (imported as dbg)
 
-
+# ---------------------------------------------------------------------------
+# Fonctions internes (non exportées)
+# ---------------------------------------------------------------------------
+# Calcul des matrices locales d'un élément 1D (corde tendue)
 def _matrix_stats(name: str, M: np.ndarray) -> None:
-    try:
-        nz = np.count_nonzero(np.abs(M) > 0)
-        tot = M.size
-        frac = (nz / tot * 100.0) if tot else 0.0
-        print(f"[DEBUG] {name}: shape={M.shape}, nnz={nz} ({frac:.1f}%), fro={np.linalg.norm(M, 'fro'):.3e}, min={M.min():.3e}, max={M.max():.3e}")
-    except Exception as e:
-        print(f"[DEBUG] {name}: stats error: {e}")
+    # Use centralized debug helper
+    dbg.matrix_stats(name, M)
 
 
 def _print_blocks(name: str, M: np.ndarray, k: int = 4) -> None:
-    try:
-        k = int(max(1, k))
-        tl = M[:k, :k]
-        br = M[-k:, -k:]
-        with np.printoptions(precision=3, suppress=True):
-            print(f"[DEBUG] {name} top-left {k}x{k}:\n{tl}")
-            print(f"[DEBUG] {name} bottom-right {k}x{k}:\n{br}")
-    except Exception as e:
-        print(f"[DEBUG] {name}: block print error: {e}")
+    dbg.print_blocks(name, M, k=k)
 
 
 def _print_bc_edges(name: str, M: np.ndarray) -> None:
-    try:
-        r0 = float(np.sum(np.abs(M[0, :])))
-        rn = float(np.sum(np.abs(M[-1, :])))
-        c0 = float(np.sum(np.abs(M[:, 0])))
-        cn = float(np.sum(np.abs(M[:, -1])))
-        print(f"[DEBUG] {name} edge sums: row0={r0:.3e}, rowN={rn:.3e}, col0={c0:.3e}, colN={cn:.3e}")
-    except Exception as e:
-        print(f"[DEBUG] {name}: edge sums error: {e}")
+    dbg.bc_edge_sums(name, M)
 
 def _detect_constrained_dofs(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
-    """Détecte les DDL contraints (CL de type Dirichlet appliquées via diag=1, lignes/colonnes nulles).
-
-    On considère qu'un DDL i est contraint si:
-      - la ligne et la colonne i de M sont nulles en dehors de la diagonale
-      - la ligne et la colonne i de K sont nulles en dehors de la diagonale
-      - M[i,i] ≈ 1 et K[i,i] ≈ 1 (convention du module pour garder l'inversibilité)
-    """
-    n = M.shape[0]
+    # Détecte les DDL contraints de type Dirichlet selon la convention du projet :
+    # - lignes/colonnes nulles hors diagonale
+    # - diagonale ≈ 1 dans M et K aux nœuds extrêmes (préserve l'inversibilité)
+    n = M.shape[0]                                  # .shape renvoie un tuple (n,), on veut l'entier
     constrained = []
     for i in range(n):
         # Copie des lignes/colonnes sans la diagonale
-        rowM = M[i, :].copy(); rowM[i] = 0.0
-        colM = M[:, i].copy(); colM[i] = 0.0
-        rowK = K[i, :].copy(); rowK[i] = 0.0
-        colK = K[:, i].copy(); colK[i] = 0.0
+        rowM = M[i, :].copy(); rowM[i] = 0.0        # Ignore diagonal
+        colM = M[:, i].copy(); colM[i] = 0.0        # Ignore diagonal
+        rowK = K[i, :].copy(); rowK[i] = 0.0        # Ignore diagonal
+        colK = K[:, i].copy(); colK[i] = 0.0        # Ignore diagonal
+        # Verifie la nullité hors diagonale et diag≈1 dans M et K
+        # .all pour s'assurer que c'est vrai pour tous les éléments du vecteur
+        # .abs pour tolérer des petites valeurs négatives numériques
         if (
             np.all(np.abs(rowM) <= atol) and np.all(np.abs(colM) <= atol)
             and np.all(np.abs(rowK) <= atol) and np.all(np.abs(colK) <= atol)
             and abs(M[i, i] - 1.0) <= 1e-9 and abs(K[i, i] - 1.0) <= 1e-9
         ):
             constrained.append(i)
+    # Retourne les DDL contraints détectés
+    # .asarray pour compatibilité avec np.setdiff1d en aval
     return np.asarray(constrained, dtype=int)
 
 def _apply_fixed_bc_inplace(mat: np.ndarray) -> None:
-        """
-        Applique des conditions aux limites fixes (Dirichlet) sur place.
-
-        Stratégie :
-            - Annule les lignes/colonnes des nœuds extrêmes.
-            - Met la diagonale à 1 sur ces nœuds pour rendre la matrice inversible
-                (utile pour solveurs linéaires simples / élimination).
-        """
-        mat[0, :] = 0.0
-        mat[-1, :] = 0.0
-        mat[:, 0] = 0.0
-        mat[:, -1] = 0.0
-        mat[0, 0] = 1.0
-        mat[-1, -1] = 1.0
+    # Applique les CL fixes in-place (Dirichlet) :
+    # - annule les lignes/colonnes des extrémités; impose diag=1 sur ces nœuds
+    #   afin de garder la matrice inversible lors de la résolution linéaire.
+        mat[0, :] = 0.0     # ligne 0 -> première ligne
+        mat[-1, :] = 0.0    # ligne -1 -> dernière ligne
+        mat[:, 0] = 0.0     # colonne 0 -> première colonne
+        mat[:, -1] = 0.0    # colonne -1 -> dernière colonne
+        mat[0, 0] = 1.0     # impose diag=1 -> premier nœud
+        mat[-1, -1] = 1.0   # impose diag=1 -> dernier nœud
 
 def _apply_fixed_bc_inplace_damping(mat: np.ndarray) -> None:
-    """
-    Applique des conditions aux limites sur la matrice d'amortissement C.
-
-    Différence clé par rapport à _apply_fixed_bc_inplace:
-    - On ANNULE les lignes/colonnes des nœuds extrêmes, mais on NE met PAS
-      la diagonale à 1. Pour C, il n'est pas nécessaire (ni souhaitable)
-      d'introduire des termes artificiels sur les DDL contraints.
-    """
-    mat[0, :] = 0.0
-    mat[-1, :] = 0.0
-    mat[:, 0] = 0.0
-    mat[:, -1] = 0.0
+    # CL pour la matrice d'amortissement C :
+    # - annule les lignes/colonnes aux extrémités
+    # - NE PAS mettre diag=1 (pas de sens physique pour C)
+    mat[0, :] = 0.0         # ligne 0 -> première ligne
+    mat[-1, :] = 0.0        # ligne -1 -> dernière ligne
+    mat[:, 0] = 0.0         # colonne 0 -> première colonne
+    mat[:, -1] = 0.0        # colonne -1 -> dernière colonne
 
 def rayleigh_damping(
     M: np.ndarray,
@@ -169,46 +162,48 @@ def rayleigh_damping(
     modes_ref: tuple[int, int],
     zetas_ref: tuple[float, float],
 ):
-    """Calcule α et β de Rayleigh à partir de deux amortissements modaux et construit C = α M + β K.
-
-    Hypothèse standard: ζ(ω) = 1/2 (α/ω + β ω). On résout sur deux modes de référence p et q.
-
-    Paramètres
-    ----------
-    M, K : np.ndarray
-        Matrices de masse et raideur (n x n), symétriques définies positives (avec CL appliquées si nécessaire).
-    modes_ref : tuple[int, int]
-        Indices des deux modes utilisés comme référence (0-based), ex: (0, 1).
-    zetas_ref : tuple[float, float]
-        Amortissements désirés pour ces deux modes, ex: (0.01, 0.02).
-
-    Retour
-    ------
-    alpha : float, beta : float, C : np.ndarray, omegas : np.ndarray
-    """
+    # Calcul des paramètres d'amortissement de Rayleigh (α, β) à partir de
+    # deux amortissements modaux cibles (ζ).
+    # Formule: ζ(ω) = 1/2 (α/ω + β ω). Résoufre le système 2x2 nos modos p e q.
+    # Retourne: alpha, beta, C (= αM + βK), omegas (rad/s) des modos libres.
     # Si des CL fixes ont été appliquées via diag=1 et lignes/colonnes nulles,
     # retirer ces DDL pour le calcul propre des modes physiques.
     constrained = _detect_constrained_dofs(M, K)
-    if constrained.size > 0:
+    
+    # Vérifie si des DDL sont contraints
+    # Si oui, on retire ces DDL pour le calcul des modes physiques
+    # Si non, on utilise M et K tels quels
+    if constrained.size > 0:    # .size returne le nombre d'éléments                
+        # .setdiff1d pour obtenir les DDL libres
+        # .arrange pour générer [0, 1, 2, ..., N-1]
+        # .shape[0] pour obtenir le nombre de DDL (M est carré)
         free = np.setdiff1d(np.arange(M.shape[0]), constrained)
+        # .ix_ pour indexer les sous-matrices
         M_eval = M[np.ix_(free, free)]
         K_eval = K[np.ix_(free, free)]
     else:
         M_eval, K_eval = M, K
 
-    # Évite l'inversion explicite: résoudre M X = K -> X = M^{-1} K
-    A = np.linalg.solve(M_eval, K_eval)
-    eigvals, _ = np.linalg.eig(A)
-    eigvals = np.real(eigvals)
-    eigvals[eigvals < 0] = 0.0  # coupe les petites négativités numériques
-    omegas = np.sqrt(eigvals)
-    omegas.sort()
+    # Évite l'inversion explicite: résout M X = K -> X = M^{-1} K
+    A = np.linalg.solve(M_eval, K_eval)     # .linalg.solve pour éviter l'inversion explicite
+    eigvals, _ = np.linalg.eig(A)           # .eig pour obtenir les autovalues/vecteurs de A ~ ω^2
+    eigvals = np.real(eigvals)              # .real pour éviter les petites imaginaire numériques
+    eigvals[eigvals < 0] = 0.0              # coupe les petites négativités numériques
+    omegas = np.sqrt(eigvals)               # ω = sqrt(λ) (rad/s) 
+    omegas.sort()                           # trie croissant (utile pour les modes de référence)
 
-    p, q = modes_ref
-    if p < 0 or q < 0 or p >= omegas.size or q >= omegas.size or p == q:
+    p, q = modes_ref                        # indices des modes de référence
+    if p < 0 or q < 0 or p >= omegas.size or q >= omegas.size or p == q:    # .size returne le nombre d'éléments
         raise ValueError("modes_ref invalides par rapport au nombre de modes disponibles")
-    zeta_p, zeta_q = zetas_ref
-    omega_p, omega_q = float(omegas[p]), float(omegas[q])
+    zeta_p, zeta_q = zetas_ref              # amortissements modaux cibles
+    omega_p, omega_q = float(omegas[p]), float(omegas[q])                   # Ça doit être float pour la suite
+
+    # Validité des entrées de référence
+    # Juste pour éviter des divisions par zéro ou des cas non physiques
+    if omega_p <= 0 or omega_q <= 0:
+        raise ValueError("Fréquences de référence doivent être strictement positives")
+    if zeta_p < 0 or zeta_q < 0:
+        raise ValueError("Amortissements modaux de référence doivent être positifs ou nuls")
 
     # Solve Rayleigh parameters from the 2x2 linear system derived from
     #   2 ζ(ω) = α/ω + β ω  evaluated at ω_p and ω_q
@@ -231,8 +226,8 @@ def rayleigh_damping(
     alpha = float(alpha_lin)
     beta = float(beta_lin)
     C = alpha * M + beta * K
-    # Debug prints with levels
-    if _DEBUG_RAYLEIGH:
+    # Debug prints (single on/off)
+    if dbg.is_enabled():
         try:
             two_pi = 2.0 * np.pi
             f_hz = omegas / two_pi
@@ -242,49 +237,17 @@ def rayleigh_damping(
             zeta_p_chk = 0.5 * (alpha/omega_p + beta*omega_p)
             zeta_q_chk = 0.5 * (alpha/omega_q + beta*omega_q)
 
-            lvl = int(_DEBUG_RAYLEIGH_LEVEL)
-            if lvl <= 1:
-                # Concise 1-2 line summary
-                print(
-                    f"[RAYLEIGH] p={p}, q={q} | f_p={f_hz[p]:.2f} Hz, f_q={f_hz[q]:.2f} Hz | "
-                    f"alpha={alpha:.3e} [1/s], beta={beta:.3e} [s]"
-                )
-                print(
-                    f"[RAYLEIGH] ζp tgt/ok Δ: {zp:.4f}/{zeta_p_chk:.4f} Δ={abs(zeta_p_chk-zp):.1e} | "
-                    f"ζq tgt/ok Δ: {zq:.4f}/{zeta_q_chk:.4f} Δ={abs(zeta_q_chk-zq):.1e}"
-                )
-            if lvl >= 2:
-                print("[DEBUG] Modelo: ζ(ω) = 0.5 (α/ω + β ω)")
-                print(f"[DEBUG] modes_ref=(p={p}, q={q}), ζ_targets=({zp:.5f}, {zq:.5f})")
-                print(f"[DEBUG] ω_p={omegas[p]:.6e} rad/s, ω_q={omegas[q]:.6e} rad/s | f_p={f_hz[p]:.3f} Hz, f_q={f_hz[q]:.3f} Hz")
-                lhs_p = f"2 ζ_p = α/ω_p + β ω_p  ->  2*{zp:.6f} = α/{omega_p:.6e} + β*{omega_p:.6e}"
-                lhs_q = f"2 ζ_q = α/ω_q + β ω_q  ->  2*{zq:.6f} = α/{omega_q:.6e} + β*{omega_q:.6e}"
-                print(f"[DEBUG] Eq(p): {lhs_p}")
-                print(f"[DEBUG] Eq(q): {lhs_q}")
-                with np.printoptions(precision=6, suppress=False):
-                    print("[DEBUG] Sistema linear A·[α β]^T = b:")
-                    print(A_sys)
-                    print(b_sys)
-                print(f"[DEBUG] Solução -> α = {alpha:.6e} [1/s], β = {beta:.6e} [s]")
-                print(f"[DEBUG] Checagem ζ_p: alvo={zp:.6f} | obtido={zeta_p_chk:.6f} | Δ={abs(zeta_p_chk - zp):.2e}")
-                print(f"[DEBUG] Checagem ζ_q: alvo={zq:.6f} | obtido={zeta_q_chk:.6f} | Δ={abs(zeta_q_chk - zq):.2e}")
-            if lvl >= 3:
-                _matrix_stats("M", M)
-                _matrix_stats("K", K)
-                _matrix_stats("C=αM+βK", C)
-                try:
-                    nC = float(np.linalg.norm(C, 'fro'))
-                    nAM = float(np.linalg.norm(alpha * M, 'fro'))
-                    nBK = float(np.linalg.norm(beta * K, 'fro'))
-                    sAM = (nAM / nC * 100.0) if nC > 0 else 0.0
-                    sBK = (nBK / nC * 100.0) if nC > 0 else 0.0
-                    print(f"[DEBUG] ||αM||_F={nAM:.3e} ({sAM:.1f}% de ||C||), ||βK||_F={nBK:.3e} ({sBK:.1f}% de ||C||)")
-                except Exception:
-                    pass
-            if lvl >= 4:
-                _print_blocks("C", C, k=4)
+            # Concise 1-2 line summary (lazy formatting)
+            dbg.dlazy(lambda: (
+                f"[RAYLEIGH] p={p}, q={q} | f_p={f_hz[p]:.2f} Hz, f_q={f_hz[q]:.2f} Hz | "
+                f"alpha={alpha:.3e} [1/s], beta={beta:.3e} [s]"
+            ), prefix="")
+            dbg.dlazy(lambda: (
+                f"[RAYLEIGH] ζp tgt/ok Δ: {zp:.4f}/{zeta_p_chk:.4f} Δ={abs(zeta_p_chk-zp):.1e} | "
+                f"ζq tgt/ok Δ: {zq:.4f}/{zeta_q_chk:.4f} Δ={abs(zeta_q_chk-zq):.1e}"
+            ), prefix="")
         except Exception as _e_dbg:
-            print("[DEBUG] Rayleigh print error:", _e_dbg)
+            dbg.dprint(f"[AVERTISSEMENT] Échec d'impression Rayleigh: {_e_dbg}")
     #C = alpha * M * 0 + beta * K * 0                               # Pour désactiver l'amortissement global (test)
     return float(alpha), float(beta), C, omegas
 
@@ -298,27 +261,9 @@ def assemble_system_matrices_nonuniform(
     damping_zetas_ref: tuple[float, float] | None = None,
     apply_fixed_bc: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Assemble M, K puis calcule C = α M + β K pour une maille 1D NON uniforme.
-
-    Paramètres
-    ----------
-    dx_vector : Sequence[float] | np.ndarray
-        Longueurs élémentaires (m), taille = n_elems.
-    tension : float
-        Tension T (N).
-    lin_density : float
-        Densité linéique μ (kg/m).
-    rayleigh_alpha : float
-        Coefficient α.
-    rayleigh_beta : float
-        Coefficient β.
-    apply_fixed_bc : bool, défaut False
-        Si True applique CL fixes (nœuds extrêmes bloqués) en modifiant les matrices.
-
-    Retour
-    ------
-    (M, K, C) : tuple de matrices carrées (n_nodes, n_nodes)
-    """
+    # Assemble M et K, puis calcule C = α M + β K pour une maille NON uniforme.
+    # - dx_vector : longueurs élémentaires (m)
+    # - apply_fixed_bc : applique des CL fixes (extrémités bloquées)
     dx_arr = np.asarray(dx_vector, dtype=float)
     if dx_arr.ndim != 1 or dx_arr.size == 0:
         raise ValueError("dx_vector doit être un vecteur 1D non vide")
@@ -339,19 +284,29 @@ def assemble_system_matrices_nonuniform(
         sl = slice(i, i + 2)
         M[sl, sl] += M_local
         K[sl, sl] += K_local
+    # Amortissement global: calculer α, β à partir du système de référence
+    # puis former C = α M + β K sur les matrices PRE-CL pour éviter que les
+    # diagonales artificielles (=1) se propagent dans C.
+    if damping_modes_ref is not None and damping_zetas_ref is not None:
+        if apply_fixed_bc:
+            # Déterminer α, β sur la structure CONTRAINTE (physiquement cohérent)
+            M_eval = M.copy(); K_eval = K.copy()
+            _apply_fixed_bc_inplace(M_eval)
+            _apply_fixed_bc_inplace(K_eval)
+            alpha, beta, _, _ = rayleigh_damping(M_eval, K_eval, damping_modes_ref, damping_zetas_ref)
+        else:
+            alpha, beta, _, _ = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
+        C = alpha * M + beta * K
+    else:
+        C = np.zeros_like(M)
+
+    # Appliquer ensuite les CL: M/K avec diag=1, C avec bords annulés (sans 1)
     if apply_fixed_bc:
         _apply_fixed_bc_inplace(M)
         _apply_fixed_bc_inplace(K)
-    # Amortissement global via cibles modales s'il y en a, sinon nul
-    if damping_modes_ref is not None and damping_zetas_ref is not None:
-        _, _, C, _ = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
-    else:
-        C = np.zeros_like(M)
-    if apply_fixed_bc:
         _apply_fixed_bc_inplace_damping(C)
-        if _DEBUG_RAYLEIGH and _DEBUG_RAYLEIGH_LEVEL >= 2:
-            print("[DEBUG] Applied damping BC to C (zeroed edge rows/cols)")
-            _print_bc_edges("C after BC", C)
+        if dbg.is_enabled():
+            dbg.dprint("CL d'amortissement appliquées à C (lignes/colonnes de bord annulées)")
     return M, K, C
 
 
@@ -365,10 +320,7 @@ def assemble_system_matrices(
     damping_zetas_ref: tuple[float, float] | None = None,
     apply_fixed_bc: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Assemblage de M, K puis C = α M + β K pour un maillage UNIFORME.
-
-    Paramètres identiques à la version précédente, avec ajout de `apply_fixed_bc`.
-    """
+    # Assemble M et K, puis C = α M + β K, pour une maille UNIFORME (n_nodes, length -> dx constant).
     if n_nodes < 2:
         raise ValueError("n_nodes doit être >= 2")
     if length <= 0:
@@ -394,18 +346,28 @@ def assemble_system_matrices(
         M[sl, sl] += M_template
         K[sl, sl] += K_template
 
+    # Amortissement global: α, β depuis le système de référence
+    if damping_modes_ref is not None and damping_zetas_ref is not None:
+        if apply_fixed_bc:
+            # Évaluer α, β sur la version contrainte (M/K avec CL)
+            M_eval = M.copy(); K_eval = K.copy()
+            _apply_fixed_bc_inplace(M_eval)
+            _apply_fixed_bc_inplace(K_eval)
+            alpha, beta, _, _ = rayleigh_damping(M_eval, K_eval, damping_modes_ref, damping_zetas_ref)
+        else:
+            alpha, beta, _, _ = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
+        # Former C sur les matrices PRE-CL pour ne pas propager les diag=1
+        C = alpha * M + beta * K
+    else:
+        C = np.zeros_like(M)
+
+    # Appliquer ensuite les CL: M/K (diag=1 sur bords), C (bords annulés)
     if apply_fixed_bc:
         _apply_fixed_bc_inplace(M)
         _apply_fixed_bc_inplace(K)
-    if damping_modes_ref is not None and damping_zetas_ref is not None:
-        _, _, C, _ = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
-    else:
-        C = np.zeros_like(M)
-    if apply_fixed_bc:
         _apply_fixed_bc_inplace_damping(C)
-        if _DEBUG_RAYLEIGH and _DEBUG_RAYLEIGH_LEVEL >= 2:
-            print("[DEBUG] Applied damping BC to C (zeroed edge rows/cols)")
-            _print_bc_edges("C after BC", C)
+        if dbg.is_enabled():
+            dbg.dprint("CL d'amortissement appliquées à C (lignes/colonnes de bord annulées)")
     return M, K, C
 
 # ---------------------------------------------------------------------------
@@ -419,33 +381,8 @@ def assemble_mass(
     length: float | None = None,                            # Longueur totale (mode uniforme)
     apply_fixed_bc: bool = False,                           # Applique CL fixes si True
 ) -> np.ndarray:
-    """Assemble uniquement la matrice de masse globale M.
-
-    Deux modes:
-      - Non uniforme : fournir dx_vector (longueurs élémentaires en m).
-      - Uniforme     : fournir n_nodes et length.
-
-    Formule locale (élément de longueur dx):
-        M_e = (μ * dx / 6) [[2, 1], [1, 2]]
-
-    Paramètres
-    ----------
-    lin_density : float
-        Densité linéique μ (kg/m).
-    dx_vector : sequence[float] | None
-        Longueurs élémentaires (mode non uniforme).
-    n_nodes : int | None
-        Nombre de nœuds (mode uniforme).
-    length : float | None
-        Longueur totale (mode uniforme).
-    apply_fixed_bc : bool
-        Si True applique CL fixes (nœuds extrêmes bloqués) sur M.
-    
-    Retour
-    ------
-    M : np.ndarray
-        Matrice de masse globale (n_nodes x n_nodes).
-    """
+    # Assemble uniquement la matrice de masse M (uniforme ou non uniforme).
+    # Formule locale : M_e = (μ * dx / 6) [[2, 1], [1, 2]]
     if dx_vector is not None:
         dx_arr = np.asarray(dx_vector, dtype=float)
         if dx_arr.ndim != 1 or dx_arr.size == 0 or np.any(dx_arr <= 0):
@@ -490,30 +427,8 @@ def assemble_stiffness(
     length: float | None = None,
     apply_fixed_bc: bool = False,
 ) -> np.ndarray:
-    """Assemble seulement la matrice de raideur globale K.
-
-    Deux modes (comme assemble_mkc) :
-      - Non uniforme : fournir dx_vector (longueurs élémentaires en m).
-      - Uniforme     : fournir n_nodes et length.
-
-    Paramètres
-    ----------
-    tension : float
-        Tension T (N).
-    dx_vector : sequence[float] | None
-        Longueurs élémentaires (mode non uniforme).
-    n_nodes : int | None
-        Nombre de nœuds (mode uniforme) si dx_vector est None.
-    length : float | None
-        Longueur totale (mode uniforme).
-    apply_fixed_bc : bool
-        Si True, applique des CL fixes (nœuds extrêmes bloqués) en modifiant K.
-
-    Retour
-    ------
-    K : np.ndarray
-        Matrice de raideur globale (n_nodes x n_nodes).
-    """
+    # Assemble uniquement la matrice de raideur K (uniforme ou non uniforme).
+    # Formule locale : K_e = (T / dx) [[1, -1], [-1, 1]]
     if dx_vector is not None:
         dx_arr = np.asarray(dx_vector, dtype=float)
         if dx_arr.ndim != 1 or dx_arr.size == 0 or np.any(dx_arr <= 0):
@@ -557,25 +472,8 @@ def compute_local_element_matrices(
     n_nodes: int | None = None,
     length: float | None = None,
 ) -> list[dict[str, Any]]:
-    """
-    Calcule et retourne la liste des matrices locales (par élément) — mode NON UNIFORME uniquement.
-
-    NOTE: Fonction destinée à l'inspection et au débogage uniquement; pas d'usage en production.
-
-    Fournir dx_vector. Les paramètres n_nodes/length ne sont pas supportés ici.
-
-    Retour
-    ------
-        list[dict] : chaque entrée contient
-                {
-                    'index': i,
-                    'dx': dx_i,
-                    'mass_pref': μ * dx_i / 6,
-                    'stiff_pref': T / dx_i,
-                    'M_local': array(2x2),
-                    'K_local': array(2x2)
-                }
-    """
+    # Calcule et retourne les matrices locales par élément (mode NON uniforme).
+    # Usage : inspection/débogage. Requiert dx_vector.
     entries: list[dict[str, Any]] = []
 
     # Mode non uniforme requis
@@ -624,47 +522,21 @@ def print_local_element_matrices(
     length: float | None = None,
     limit: int | None = None,
 ) -> None:
-    """
-    Imprime les matrices locales de chaque élément — mode NON UNIFORME uniquement.
-
-    NOTE: Fonction destinée à l'inspection et au débogage uniquement; pas d'usage en production.
-
-    Paramètres
-    ----------
-    limit : int | None
-        Si défini, n'affiche que les `limit` premiers éléments.
-    """
+    # Wrapper de débogage : redirige vers dbg.print_local_element_matrices (silencieux si debug OFF).
+    # Conservé pour compatibilité ; utilise seulement le chemin centralisé utils.debug.
     if dx_vector is None:
         raise ValueError("print_local_element_matrices: dx_vector est requis (mode non uniforme uniquement)")
-    data = compute_local_element_matrices(
-        tension=tension,
-        lin_density=lin_density,
-        rayleigh_alpha=rayleigh_alpha,
-        rayleigh_beta=rayleigh_beta,
-        dx_vector=dx_vector,
-        n_nodes=None,
-        length=None,
-    )
-    total = len(data)
-    show = data if limit is None else data[:limit]
-    print(f"--- MATRICES LOCALES (total éléments = {total}) ---")
-    print("Paramètres globaux: μ = {:.6g} kg/m | T = {:.6g} N".format(
-        lin_density, tension
-    ))
-    for entry in show:
-        i = entry['index']
-        dx = entry['dx']
-        mass_pref = entry.get('mass_pref')
-        stiff_pref = entry.get('stiff_pref')
-        M_loc = entry['M_local']
-        K_loc = entry['K_local']
-        print(f"\nÉlément {i} | dx = {(dx*1000):.6g} mm")
-        if mass_pref is not None and stiff_pref is not None:
-            print("  Facteurs: mass_pref = μ*dx/6 = {:.6g} | stiff_pref = T/dx = {:.6g}".format(mass_pref, stiff_pref))
-        print("M_local =\n", M_loc)
-        print("K_local =\n", K_loc)
-    if limit is not None and total > limit:
-        print(f"\n... ({total - limit} éléments supplémentaires non affichés) ...")
+    # Déléguer vers l'aide centralisée (elle effectue elle-même les impressions protégées)
+    try:
+        dbg.print_local_element_matrices(
+            tension=tension,
+            lin_density=lin_density,
+            dx_vector=list(dx_vector),
+            limit=limit,
+        )
+    except Exception:
+    # Ne jamais casser le flux à cause du débogage
+        pass
 
 
 def assemble_mkc(
@@ -917,7 +789,7 @@ def assemble_stiffness(
 
 # --- Exécution directe pour inspection rapide ---
 # [AVERTISSEMENT] Bloc principal pour banc d'essai/diagnostic uniquement — ne pas utiliser en production
-if __name__ == "__main__":  # Petit banc d'essai
+if __name__ == "__main__":  # Petit banc d'essai (silencieux se debug desligado)
     import sys
     from pathlib import Path
 
@@ -949,196 +821,6 @@ if __name__ == "__main__":  # Petit banc d'essai
         damping_modes_ref=modes_ref,
         damping_zetas_ref=zetas_ref,
     )
-    print("Meta:", meta)
-    print("Dimensions:", M.shape)
-    print("Symétrie M,K,C:", np.allclose(M,M.T), np.allclose(K,K.T), np.allclose(C,C.T))
-
-    # Affiche un extrait de diagonales
-    import numpy as _np
-    print("Diag M:", _np.round(_np.diag(M),6))
-    print("Diag K:", _np.round(_np.diag(K),6))
-    print("Diag C:", _np.round(_np.diag(C),6))
-
-    # ---------------------------------------------------------------
-    # Diagnostics supplémentaires pour éviter l'effet "tout zéro" dû
-    #                  à l'arrondi d'impression.
-    # ---------------------------------------------------------------
-    print("\n[DIAGNOSTIC] Statistiques M:")
-    # Extraction des entrées non nulles
-    nonzero = M[np.abs(M) > 0]
-    if nonzero.size:
-        print(f" min = {nonzero.min():.3e}")                                                                                            # Valeur minimale non nulle
-        print(f" max = {nonzero.max():.3e}")                                                                                            # Valeur maximale
-        print(f" somme = {M.sum():.3e}")                                                                                                # Somme des éléments
-        masse_teoricale = float(config.MU * meta.get('length_recon', 0))
-        print(f" masse totale théorique = μ * L = {masse_teoricale:.3e} kg")                                                            # Masse totale théorique
-        diference_masse = abs(masse_teoricale - M.sum())
-        print(f" diference masse totale - somme de la matrice M = {diference_masse:.3e}")                                               # Vérification masse totale
-        print(f" porcentage de erreur sur la masse totale = {100.0 * diference_masse / float(config.MU * meta.get('length_recon', 1e-10)):.3e} %")  # Pourcentage d'erreur
-    else:
-        print("  (aucune entrée non nulle détectée)")
-
-    # Impression en notation scientifique
-    with _np.printoptions(precision=3, suppress=False):
-        print("\nM (notation scientifique) =\n", M)
-
-    # Version mise à l'échelle (micro) pour lecture intuitive
-    scale = 1e6
-    with _np.printoptions(precision=3, suppress=True):
-        print(f"\nM (x{scale:.0e}) =\n", M * scale, "\n")
-
-    # ---------------------------------------------------------------
-    #      Diagnostics similaires pour la matrice de raideur K
-    # ---------------------------------------------------------------
-    print("[DIAGNOSTIC] Statistiques K:")
-    nonzero_K = K[np.abs(K) > 0]
-    if nonzero_K.size:
-        print(f" min = {nonzero_K.min():.3e}")                      # Valeur minimale non nulle
-        print(f" max = {nonzero_K.max():.3e}")                      # Valeur maximale
-        print(f" somme = {K.sum():.3e}")                            # Somme des éléments
-    else:
-        print("  (aucune entrée non nulle détectée)")
-
-    with _np.printoptions(precision=3, suppress=False):
-        print("\nK (notation scientifique) =\n", K)
-    # Impression supplémentaire uniquement si valeurs TRÈS grandes
-    if nonzero_K.size:
-        max_abs_K = float(np.max(np.abs(nonzero_K)))
-        if max_abs_K > 1e3:                                         # Seuil arbitraire pour considérer "grand"
-            scale_K = 1e-3                                          # Échelle milli
-            with _np.printoptions(precision=3, suppress=True):      # _np.printoptions nous permet de faire un contexte temporaire
-                print(f"\nK (échelle réduite x{scale_K:.0e}) =\n", K * scale_K, "\n")
-
-    # ---------------------------------------------------------------
-    #      Diagnostics similaires pour la matrice d'amortissement C
-    # ---------------------------------------------------------------
-    print("[DIAGNOSTIC] Statistiques C:")
-    nonzero_C = C[np.abs(C) > 0]
-    if nonzero_C.size:
-        print(f" min = {nonzero_C.min():.3e}")                      # Valeur minimale non nulle
-        print(f" max = {nonzero_C.max():.3e}")                      # Valeur maximale
-        print(f" somme = {C.sum():.3e}")                            # Somme des éléments
-    else:
-        print("  (aucune entrée non nulle détectée)")
-
-    with _np.printoptions(precision=3, suppress=False):
-        print("\nC (notation scientifique) =\n", C)
-    # Comme pour K, on ne réduit l'échelle que si les valeurs sont très grandes
-    if nonzero_C.size:
-        max_abs_C = float(np.max(np.abs(nonzero_C)))
-        if max_abs_C > 1e3:
-            scale_C = 1e-3
-            with _np.printoptions(precision=3, suppress=True):
-                print(f"\nC (échelle réduite x{scale_C:.0e}) =\n", C * scale_C, "\n")
-
-    # ---------------------------------------------------------------
-    #    Diagnostics Rayleigh: α, β, normes et amortissements modaux
-    # ---------------------------------------------------------------
-    try:
-        alpha = meta.get('alpha', None)
-        beta = meta.get('beta', None)
-        _omegas_meta = np.asarray(meta.get('omegas', []), dtype=float)
-        if alpha is not None and beta is not None:
-            print("\n[DIAGNOSTIC] Rayleigh (C = α M + β K):")
-            print(f"  Alpha = {alpha:.6e} [1/s] | Beta = {beta:.6e} [s]")
-
-            # Normes de Frobenius pour évaluer les ordres de grandeur
-            nM = float(np.linalg.norm(M, 'fro'))
-            nK = float(np.linalg.norm(K, 'fro'))
-            nC = float(np.linalg.norm(C, 'fro'))
-            nAM = float(np.linalg.norm(alpha * M, 'fro'))
-            nBK = float(np.linalg.norm(beta * K, 'fro'))
-            share_am = (nAM / nC * 100.0) if nC > 0 else 0.0
-            share_bk = (nBK / nC * 100.0) if nC > 0 else 0.0
-            print(f"  ||M||_F = {nM:.3e} | ||K||_F = {nK:.3e} | ||C||_F = {nC:.3e}")
-            print(f"  ||αM||_F = {nAM:.3e} ({share_am:.1f}% de ||C||) | ||βK||_F = {nBK:.3e} ({share_bk:.1f}% de ||C||)")
-
-            # Amortissements modaux réalisés: ζ_i = 1/2 (α/ω_i + β ω_i)
-            if _omegas_meta.size > 0:
-                zetas_real = 0.5 * (alpha / _omegas_meta + beta * _omegas_meta)
-                k_show = int(min(10, zetas_real.size))
-                with _np.printoptions(precision=4, suppress=True):
-                    print(f"  ζ(modaux) réalisés — premiers {k_show}:", zetas_real[:k_show])
-                # Mettre en évidence les modes de référence et l'écart
-                if isinstance(modes_ref, tuple) and len(modes_ref) == 2:
-                    p, q = modes_ref
-                    if 0 <= p < zetas_real.size and 0 <= q < zetas_real.size:
-                        zp, zq = zetas_real[p], zetas_real[q]
-                        try:
-                            zt_p, zt_q = zetas_ref
-                        except Exception:
-                            zt_p, zt_q = None, None
-                        msg_p = f"p={p}: ζ_real = {zp:.5f}"
-                        if zt_p is not None:
-                            msg_p += f" | ζ_cible = {zt_p:.5f} | Δ = {abs(zp - zt_p):.2e}"
-                        msg_q = f"q={q}: ζ_real = {zq:.5f}"
-                        if zt_q is not None:
-                            msg_q += f" | ζ_cible = {zt_q:.5f} | Δ = {abs(zq - zt_q):.2e}"
-                        print("  Cibles:")
-                        print("   ", msg_p)
-                        print("   ", msg_q)
-                        print("  (Des valeurs de C petites peuvent être NORMALES si les ζ réalisés correspondent aux cibles.)")
-    except Exception as _e_diag:
-        print("[WARN] Échec des diagnostics Rayleigh:", _e_diag)
-
-    # Affiche maintenant les matrices locales (c'est possible de limiter en cas de grand nombre d'éléments)
-    #print_local_element_matrices(
-    #    tension=config.T,                                           # Paramètres globaux -> Tension                                        
-    #    lin_density=config.MU,                                      # Paramètres globaux -> Densité linéique    
-    #    rayleigh_alpha=0.0,                                         # Non utilisé ici (calcul α/β modal)
-    #    rayleigh_beta=0.0,                                          # Non utilisé ici (calcul α/β modal)
-    #    dx_vector=[d/1000.0 for d in dxs_mm] if dxs_mm else None,   # Mode non uniforme si dxs_mm existe et converti en m
-    #    n_nodes=None if dxs_mm else config.N_NODES,                 # Le nombre de nœuds n'est utile que pour le mode uniforme
-    #    length=None if dxs_mm else config.L,                        # La longueur totale n'est utile que pour le mode uniforme   
-    #    limit=None,                                                 # Se juste placer ici le limite que vous voulez
-    #)
-
-    # ---------------------------------------------------------------
-    #            Fréquences propres: affichage de contrôle
-    # ---------------------------------------------------------------
-    try:
-        # 1) Source préférée des pulsations propres ω (rad/s):
-        #    Si le calcul de Rayleigh (α, β) a déjà été effectué, la fonction
-        #    rayleigh_damping(...) a résolu le problème aux valeurs propres
-        #    généralisé K x = ω² M x (sur les DDL libres) et a stocké les ω
-        #    dans meta['omegas'].
-        _omegas = np.asarray(meta.get('omegas', []), dtype=float)
-
-        # 2) Fallback si meta ne contient pas les ω:
-        #    On recalcule rapidement à partir de M et K en formant la matrice
-        #    A = M^{-1} K, puis en résolvant A v = λ v avec λ = ω².
-        #    Détails des appels numpy:
-        #      - np.linalg.solve(M, K): résout M · A = K pour A (évite l'inversion explicite de M).
-        #      - np.linalg.eig(A): renvoie (valeurs propres λ, vecteurs propres).
-        #      - np.real(...): on projette sur la partie réelle (petits imaginaires numériques -> 0).
-        #      - np.sqrt(λ): donne ω = √λ (rad/s).
-        if _omegas.size == 0:
-            # NOTE sur CL (Dirichlet via diag=1 et lignes/colonnes nulles):
-            # Si M et K contiennent déjà ces CL, A inclura des modes triviaux
-            # contraints. C'est acceptable ici car ce bloc est purement
-            # diagnostique et, en pratique, meta['omegas'] est préféré.
-            A = np.linalg.solve(M, K)         # A ≡ M^{-1} K (sans inversion explicite)
-            eigvals, _ = np.linalg.eig(A)     # valeurs propres λ ≈ ω²
-            eigvals = np.real(eigvals)        # on ignore de minuscules parties imaginaires
-            eigvals[eigvals < 0] = 0.0        # coupe les petites négativités dues aux erreurs d'arrondi
-            _omegas = np.sqrt(eigvals)        # ω = √λ (rad/s)
-            _omegas.sort()                    # tri croissant des pulsations
-
-        # 3) Conversion en fréquences f (Hz): f = ω / (2π)
-        f_hz = _omegas / (2 * np.pi)
-
-        # 4) Impression formatée: np.printoptions crée un contexte temporaire
-        #    de formatage (ici: 3 décimales, suppression des notations
-        #    scientifiques pour les petites valeurs si approprié).
-        with _np.printoptions(precision=3, suppress=True):
-            print("\nFréquences (Hz) — premières 10 =", f_hz[:10])
-
-        # 5) Rappel des modes de référence (si définis): on affiche les
-        #    fréquences associées aux indices (p, q) et les ζ demandés.
-        if isinstance(modes_ref, tuple) and len(modes_ref) == 2:
-            p, q = modes_ref
-            if 0 <= p < f_hz.size and 0 <= q < f_hz.size:
-                print(f"Modes réf. (p={p}, q={q}) → f_p = {f_hz[p]:.3f} Hz | f_q = {f_hz[q]:.3f} Hz | ζ = {zetas_ref}")
-    except Exception as e:
-        # C'est juste un diagnostic, on ne veut pas planter le script
-        print("[WARN] Échec lors de l'impression des fréquences:", e)
+    # Diagnostics (silencieux quando debug desativado)
+    if hasattr(dbg, "print_formulation_diagnostics"):
+        dbg.print_formulation_diagnostics(M, K, C, meta=meta, modes_ref=modes_ref, zetas_ref=zetas_ref, config=config)

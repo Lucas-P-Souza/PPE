@@ -1,16 +1,14 @@
-"""
-Script temporário: lê o CSV gerado pelo solver e monta gráficos de:
-- Movimento da onda (mapa de calor: deslocamento por nó vs tempo)
-- Amortecimento (série temporal de um nó + envelope RMS)
-
-Uso:
-  - Sem argumentos: busca o CSV mais recente em ./results/positions_simple_*.csv
-  - Com argumento: caminho para um CSV específico
-
-Saída:
-  - Salva um PNG ao lado do CSV com sufixo _plot.png
-  - Abre a janela do gráfico (se backend permitir)
-"""
+# Script temporaire: lit le CSV généré par le solveur et produit des graphiques de:
+# - Mouvement de l'onde (carte thermique: déplacement par nœud vs temps)
+# - Amortissement (série temporelle d'un nœud + enveloppe RMS)
+#
+# Utilisation:
+#  - Sans arguments: cherche le CSV le plus récent dans ./results/positions_simple_*.csv
+#  - Avec argument: chemin vers un CSV spécifique
+#
+# Sortie:
+#  - Enregistre un PNG à côté du CSV avec le suffixe _plot.png
+#  - Ouvre la fenêtre du graphique (si le backend le permet)
 
 from __future__ import annotations
 
@@ -40,13 +38,12 @@ def _moving_rms(x: np.ndarray, win: int) -> np.ndarray:
 
 
 def _x_positions_from_config(n_nodes: int) -> Optional[np.ndarray]:
-    """Tenta recuperar coordenadas físicas x (em metros) a partir do config.
-    - Se FRET_DXS_MM existir: usa cumulativa desses dxs (em m).
-    - Senão, se L e N_NODES existirem: usa linspace uniforme [0, L].
-    Retorna None em caso de falha.
-    """
+    # Tente de récupérer des coordonnées physiques x (en mètres) à partir du module config.
+    # - Si FRET_DXS_MM existe: utilise la cumulée de ces dx (en m).
+    # - Sinon, si L et N_NODES existent: utilise un linspace uniforme [0, L].
+    # Retourne None en cas d'échec.
     try:
-        # Ajuste sys.path para importar o pacote
+    # Ajuste sys.path pour importer le paquet
         ROOT = Path(__file__).resolve().parents[3]
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
@@ -71,7 +68,7 @@ def _x_positions_from_config(n_nodes: int) -> Optional[np.ndarray]:
 
 
 def plot_wave_and_damping(csv_path: Path, node_index: int | None = None, save_png: bool = True) -> Path:
-    # Carrega dados
+    # Charge les données
     data = np.loadtxt(csv_path, delimiter=",", skiprows=1)
     t = data[:, 0]
     U = data[:, 1:]
@@ -81,38 +78,38 @@ def plot_wave_and_damping(csv_path: Path, node_index: int | None = None, save_pn
     node_index = int(np.clip(node_index, 0, n_nodes - 1))
 
     dt = float(t[1] - t[0]) if len(t) > 1 else 1.0
-    # Janela ~10 ms para envelope (se dt muito pequeno, ainda funciona)
+    # Fenêtre ~10 ms pour l'enveloppe (si dt est très petit, cela fonctionne toujours)
     win = max(1, int(round(0.010 / dt)))
     y = U[:, node_index]
     env = _moving_rms(y, win)
 
-    # Eixo X físico (opcional)
+    # Axe X physique (optionnel)
     x = _x_positions_from_config(n_nodes)
     x_nodes = x if x is not None else np.arange(n_nodes)
     x_label = "Posição (m)" if x is not None else "Índice do nó"
 
-    # Figura com dois painéis
+    # Figure avec deux panneaux
     fig = plt.figure(figsize=(12, 6))
     gs = gridspec.GridSpec(2, 2, height_ratios=[1.2, 1.0])
 
-    # Painel 1: movimento da onda (heatmap)
+    # Panneau 1: mouvement de l'onde (carte thermique)
     ax1 = fig.add_subplot(gs[0, :])
-    # Heatmap em coordenada de nó; se quisermos x físico no eixo vertical,
-    # precisaríamos reamostrar. Aqui, mantemos índice para o heatmap.
+    # Carte thermique en coordonnées de nœud; si l'on veut x physique sur l'axe vertical,
+    # il faudrait rééchantillonner. Ici, on garde l'indice pour la carte thermique.
     im = ax1.imshow(U.T, aspect="auto",
                     extent=[float(t[0]), float(t[-1]), 0, n_nodes - 1],
                     origin="lower", cmap="RdBu_r")
-    ax1.set_title("Movimento da onda (deslocamento vs tempo)")
-    ax1.set_xlabel("Tempo (s)")
-    ax1.set_ylabel("Índice do nó")
+    ax1.set_title("Mouvement de l'onde (déplacement vs temps)")
+    ax1.set_xlabel("Temps (s)")
+    ax1.set_ylabel("Indice du nœud")
     cbar = fig.colorbar(im, ax=ax1, fraction=0.046, pad=0.02)
-    cbar.set_label("Deslocamento (m)")
+    cbar.set_label("Déplacement (m)")
 
-    # Painel 2: perfis espaciais em 4 instantes
+    # Panneau 2: profils spatiaux à 4 instants
     ax2 = fig.add_subplot(gs[1, 0])
-    ax2.set_title("Perfis espaciais em instantes amostrados")
-    ax2.set_xlabel("Índice do nó")
-    ax2.set_ylabel("Deslocamento (m)")
+    ax2.set_title("Profils spatiaux à des instants échantillonnés")
+    ax2.set_xlabel("Indice du nœud")
+    ax2.set_ylabel("Déplacement (m)")
     node_ids = x_nodes
     sample_ids = np.linspace(0, steps - 1, num=4, dtype=int)
     for sid in sample_ids:
@@ -122,11 +119,11 @@ def plot_wave_and_damping(csv_path: Path, node_index: int | None = None, save_pn
     ax2.set_xlim(x_nodes[0], x_nodes[-1])
     ax2.set_xlabel(x_label)
 
-    # Painel 3: amortecimento (nó selecionado)
+    # Panneau 3: amortissement (nœud sélectionné)
     ax3 = fig.add_subplot(gs[1, 1])
-    ax3.set_title(f"Amortecimento — nó {node_index}")
-    ax3.set_xlabel("Tempo (s)")
-    ax3.set_ylabel("Deslocamento (m)")
+    ax3.set_title(f"Amortissement — nœud {node_index}")
+    ax3.set_xlabel("Temps (s)")
+    ax3.set_ylabel("Déplacement (m)")
     ax3.plot(t, np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0), label="Sinal")
     ax3.plot(t, np.nan_to_num(env, nan=0.0, posinf=0.0, neginf=0.0), "k", lw=2, label="Envelope (RMS)")
     ax3.legend(loc="best")
@@ -145,23 +142,23 @@ def plot_wave_and_damping(csv_path: Path, node_index: int | None = None, save_pn
 
 
 if __name__ == "__main__":
-    # Detecta CSV
+    # Détecte le CSV
     this_file = Path(__file__).resolve()
     results_dir = this_file.parent
     csv_arg = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     if csv_arg is None:
         csv_path = _find_latest_csv(results_dir)
         if csv_path is None:
-            print("[ERRO] Nenhum CSV 'positions_simple_*.csv' encontrado em:", results_dir)
+            print("[ERREUR] Aucun CSV 'positions_simple_*.csv' trouvé dans:", results_dir)
             sys.exit(1)
     else:
         csv_path = csv_arg
         if not csv_path.exists():
-            print("[ERRO] CSV não encontrado:", csv_path)
+            print("[ERREUR] CSV introuvable:", csv_path)
             sys.exit(1)
 
     out_png = plot_wave_and_damping(csv_path)
-    print("[OK] Gráfico salvo em:", out_png)
+    print("[OK] Graphique enregistré dans:", out_png)
     # Mostrar figura (se backend interativo disponível)
     try:
         plt.show()

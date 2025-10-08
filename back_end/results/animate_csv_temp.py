@@ -1,14 +1,12 @@
-"""
-Script temporário: cria uma animação (GIF) do movimento da corda a partir do CSV.
-
-Funcionalidades:
-- Carrega o CSV mais recente (positions_simple_*.csv) ou um arquivo específico.
-- Anima o perfil espacial U(x, t) ao longo do tempo.
-- Faz decimação de frames para controlar duração.
-- Ajuste robusto de limites Y (com clipping por percentil) para evitar estouros.
-
-Saída: salva um GIF ao lado do CSV com sufixo _anim.gif
-"""
+# Script temporaire: crée une animation (GIF) du mouvement de la corde à partir d'un CSV.
+#
+# Fonctionnalités:
+# - Charge le CSV le plus récent (positions_simple_*.csv) ou un fichier spécifique.
+# - Anime le profil spatial U(x, t) au cours du temps.
+# - Décimation des frames pour contrôler la durée.
+# - Limites Y robustes (clipping par percentile) pour éviter des échelles dominées par des outliers.
+#
+# Sortie: enregistre un GIF à côté du CSV avec le suffixe _anim.gif
 
 from __future__ import annotations
 
@@ -18,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg", force=True)  # render sem janela
+matplotlib.use("Agg", force=True)  # rendu sans fenêtre
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
 
@@ -29,7 +27,7 @@ def _find_latest_csv(results_dir: Path) -> Optional[Path]:
 
 
 def _robust_ylim(U: np.ndarray, q: float = 99.0) -> tuple[float, float]:
-    # Limites por percentil para evitar escala dominada por outliers/instabilidade
+    # Limites basés sur un percentile pour éviter des échelles dominées par des outliers/instabilités
     lo = float(np.nanpercentile(U, 100 - q))
     hi = float(np.nanpercentile(U, q))
     if not np.isfinite(lo) or not np.isfinite(hi) or lo == hi:
@@ -70,16 +68,16 @@ def animate_csv(csv_path: Path, every: int = 5, fps: int = 30) -> Path:
     steps, n_nodes = U.shape
     x = _x_positions_from_config(n_nodes)
     node_ids = x if x is not None else np.arange(n_nodes)
-    x_label = "Posição (m)" if x is not None else "Índice do nó"
+    x_label = "Position (m)" if x is not None else "Indice du nœud"
 
-    # Remoção de cauda instável: encontra último índice válido
+    # Suppression de la queue instable: trouve le dernier indice valide
     U_finite = np.isfinite(U)
     valid_mask = np.all(U_finite, axis=1)
     last_valid = np.where(valid_mask)[0].max() if np.any(valid_mask) else (steps - 1)
     U_clip = U[: last_valid + 1, :]
     t_clip = t[: last_valid + 1]
 
-    # Threshold robusto por percentil para cortar explosões tardias
+    # Seuil robuste par percentile pour couper des explosions tardives
     U_abs = np.abs(np.nan_to_num(U_clip, nan=0.0, posinf=0.0, neginf=0.0))
     q = np.nanpercentile(U_abs, 99.5)
     if not np.isfinite(q) or q <= 0:
@@ -90,25 +88,25 @@ def animate_csv(csv_path: Path, every: int = 5, fps: int = 30) -> Path:
     U_clip = U[: last_idx + 1, :]
     t_clip = t[: last_idx + 1]
 
-    # Seleção de frames (decimação) após limpeza
+    # Sélection des frames (décimation) après nettoyage
     idx = np.arange(0, U_clip.shape[0], max(1, int(every)))
     t_sel = t_clip[idx]
     U_sel = U_clip[idx, :]
 
-    # Eixos e curva
+    # Axes et courbe
     fig, ax = plt.subplots(figsize=(8, 4))
     y0 = np.nan_to_num(U_sel[0, :], nan=0.0, posinf=0.0, neginf=0.0)
     line, = ax.plot(node_ids, y0, lw=2)
     ax.set_xlabel(x_label)
-    ax.set_ylabel("Deslocamento (m)")
-    ax.set_title("Movimento da corda ao longo do tempo")
+    ax.set_ylabel("Déplacement (m)")
+    ax.set_title("Mouvement de la corde au cours du temps")
 
-    # Limites robustos
+    # Limites robustes
     ylo, yhi = _robust_ylim(np.nan_to_num(U_sel, nan=0.0, posinf=0.0, neginf=0.0))
     ax.set_ylim(ylo, yhi)
     ax.set_xlim(node_ids[0], node_ids[-1])
 
-    # Animação com PillowWriter
+    # Animation avec PillowWriter
     out_gif = csv_path.with_name(csv_path.stem + "_anim.gif")
     writer = PillowWriter(fps=fps)
 
@@ -116,7 +114,7 @@ def animate_csv(csv_path: Path, every: int = 5, fps: int = 30) -> Path:
         for k in range(len(idx)):
             yk = np.nan_to_num(U_sel[k, :], nan=0.0, posinf=0.0, neginf=0.0)
             line.set_ydata(yk)
-            ax.set_title(f"Movimento da corda — t={t_sel[k]:.4f} s")
+            ax.set_title(f"Mouvement de la corde — t={t_sel[k]:.4f} s")
             writer.grab_frame()
 
     plt.close(fig)
@@ -127,7 +125,7 @@ if __name__ == "__main__":
     res_dir = Path(__file__).resolve().parent
     csv = Path(sys.argv[1]) if len(sys.argv) > 1 else _find_latest_csv(res_dir)
     if csv is None or not csv.exists():
-        print("[ERRO] CSV não encontrado. Gere a simulação primeiro.")
+        print("[ERREUR] CSV introuvable. Générez d'abord la simulation.")
         sys.exit(1)
     gif_path = animate_csv(csv)
-    print("[OK] GIF salvo em:", gif_path)
+    print("[OK] GIF enregistré dans:", gif_path)

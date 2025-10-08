@@ -1,8 +1,7 @@
-"""Backend simulation entry point.
-
-Runs the non-uniform string FEM simulation using the Rayleigh damping setup
-from config, integrates with Newmark-beta, and saves plots/animation.
-"""
+# Point d'entrée (historique) de la simulation backend.
+#
+# Lance la simulation FEM (maille non uniforme) avec amortissement de Rayleigh
+# depuis config, intègre avec Newmark-beta et sauvegarde des graphiques/animations.
 from __future__ import annotations
 
 from pathlib import Path
@@ -26,6 +25,7 @@ try:
         animate_string_motion,
         save_string_frame_png,
         plot_snapshots_png,
+        save_displacement_csv,
     )
 except ModuleNotFoundError:
     # Fallback when executed as a standalone script (ensure workspace root on sys.path)
@@ -50,6 +50,7 @@ except ModuleNotFoundError:
         animate_string_motion,
         save_string_frame_png,
         plot_snapshots_png,
+        save_displacement_csv,
     )
 
 
@@ -64,7 +65,7 @@ def main() -> None:
     else:
         M, K, C = res[:3]
         meta = {}
-    print("[INFO] Matrizes montadas a partir do config.")
+    print("[INFO] Matrices assemblées à partir du config.")
 
     # Validate shapes, symmetry and boundary conditions
     validar_mck(M, C, K, verbose=True)
@@ -89,7 +90,7 @@ def main() -> None:
     n = M.shape[0]
     x_coords = build_node_positions_from_config(n)
     freqs_hz, modes_full = compute_modal_frequencies_and_modes(M, K, num_modes=4)
-    print("Primeiras frequências (Hz):", np.round(freqs_hz, 3))
+    print("Premières fréquences (Hz):", np.round(freqs_hz, 3))
     plots_dir = ROOT / "digital_twin" / "back_end" / "results" / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
     plot_first_modes(x_coords, modes_full, freqs_hz, max_modes=4, savepath=str(plots_dir / "modes_first4.png"))
@@ -99,43 +100,47 @@ def main() -> None:
     F_zero = zero_force_provider(n)
     t_vec, U_hist, V_hist, A_hist = newmark_beta(M, C, K, F_zero, dt=delta_t, t_max=T_total, U0=U0, V0=V0_zero, A0=None)
 
+    # Save CSV of string positions over time
+    csv_path = plots_dir / "string_positions.csv"
+    save_displacement_csv(t_vec, U_hist, str(csv_path))
+
     # Displacement over time for a representative node
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except Exception as _eplt:  # pragma: no cover
-        print("[AVISO] matplotlib indisponível para plot de x(t):", _eplt)
+        print("[AVERTISSEMENT] matplotlib indisponible pour tracer x(t):", _eplt)
     else:
         node_idx = max(1, n // 3)
         plt.figure(figsize=(8, 4))
         plt.plot(t_vec, U_hist[node_idx, :], lw=1.2)
-        plt.title(f"Deslocamento no nó {node_idx} — Newmark (β=1/4, γ=1/2), U0 triang (pincamento), F=0")
-        plt.xlabel("tempo (s)")
+        plt.title(f"Déplacement au nœud {node_idx} — Newmark (β=1/4, γ=1/2), U0 triangulaire (pincement), F=0")
+        plt.xlabel("temps (s)")
         plt.ylabel("x (m)")
         plt.grid(True, alpha=0.3)
         outp = plots_dir / "newmark_node_displacement.png"
         plt.tight_layout(); plt.savefig(outp, dpi=150); plt.close()
-        print(f"[INFO] Plot de x(t) salvo em: {outp}")
+        print(f"[INFO] Tracé de x(t) enregistré dans: {outp}")
 
-        # Energies
+        # Énergies
         Ek, Ep, Et = compute_energies_over_time(M, K, U_hist, V_hist)
         plt.figure(figsize=(9, 5))
-        plt.plot(t_vec, Ek, label="E cinética")
-        plt.plot(t_vec, Ep, label="E potencial")
-        plt.plot(t_vec, Et, label="E total", lw=1.8)
-        plt.title("Energias ao longo do tempo")
-        plt.xlabel("tempo (s)")
-        plt.ylabel("energia (J)")
+        plt.plot(t_vec, Ek, label="E cinétique")
+        plt.plot(t_vec, Ep, label="E potentielle")
+        plt.plot(t_vec, Et, label="E totale", lw=1.8)
+        plt.title("Énergies au cours du temps")
+        plt.xlabel("temps (s)")
+        plt.ylabel("énergie (J)")
         plt.grid(True, alpha=0.3)
         plt.legend()
         outpE = plots_dir / "newmark_energies.png"
         plt.tight_layout(); plt.savefig(outpE, dpi=150); plt.close()
-        print(f"[INFO] Plot de energias salvo em: {outpE}")
+        print(f"[INFO] Tracé des énergies enregistré dans: {outpE}")
 
     # FFT at output node
     out_node = int(getattr(_cfg, "OUTPUT_NODE", max(1, n // 2)))
     out_node = max(0, min(n - 1, out_node))
     fft_path = plots_dir / "newmark_output_fft.png"
-    plot_fft_png(U_hist[out_node, :], delta_t, str(fft_path), title=f"FFT — nó {out_node}", fmax=None)
+    plot_fft_png(U_hist[out_node, :], delta_t, str(fft_path), title=f"FFT — nœud {out_node}", fmax=None)
 
     # Animation and first-frame PNG
     anim_path = plots_dir / "string_motion.gif"
@@ -193,7 +198,7 @@ def main() -> None:
         n_snapshots=n_snap,
         decim=snap_decim,
         savepath=str(snap_path),
-        title="Perfis da corda em tempos selecionados",
+        title="Profils de la corde à des temps sélectionnés",
         y_scale=_snap_y_scale,
         y_pad_frac=_snap_y_pad,
         t_window=_snap_t_window,
@@ -207,24 +212,23 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-"""Ce fichier foi removido do pipeline a pedido do usuário.
-
-Mantemos apenas:
- - back_end/fem/formulation.py
- - back_end/fem/solver.py
- - back_end/mesh/calcul_trous_de_frette.py
- - back_end/mesh/fret_mesh.py
- - back_end/config.py
- - back_end/__init__.py
-
-Qualquer uso deste arquivo deve ser interrompido. Ele permanece apenas como stub
-para evitar imports quebrados em ambientes antigos.
-"""
+# Ce fichier a été retiré du pipeline à la demande de l'utilisateur.
+#
+# À conserver seulement:
+#  - back_end/fem/formulation.py
+#  - back_end/fem/solver.py
+#  - back_end/mesh/calcul_trous_de_frette.py
+#  - back_end/mesh/fret_mesh.py
+#  - back_end/config.py
+#  - back_end/__init__.py
+#
+# Tout usage de ce fichier doit être interrompu. Il reste uniquement comme stub
+# pour éviter des imports cassés dans d'anciens environnements.
 
 import sys
 
 def _removed_entrypoint() -> None:  # pragma: no cover
-    print("[INFO] main.py removido durante a limpeza. Use apenas formulation/solver/mesh/config.")
+    print("[INFO] main.py retiré lors du nettoyage. Utilisez seulement formulation/solver/mesh/config.")
     raise SystemExit(0)
 
 if __name__ == "__main__":  # pragma: no cover

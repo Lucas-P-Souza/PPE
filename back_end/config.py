@@ -1,30 +1,17 @@
-"""Centralisation des paramètres pour la simulation FEM d'une corde vibrante.
-
-Objectif
---------
-Rassembler en un seul endroit tous les réglages de la simulation (physique,
-maillage, intégration temporelle, conditions initiales, sorties/visualisations)
-pour éviter de modifier le code cœur dans `formulation.py` (assemblage de M, K,
-et amortissement de Rayleigh C) et `solver.py` (validation, intégration Newmark,
-FFT, figures et animations).
-
-Où ces paramètres sont utilisés
--------------------------------
-- formulation.py:
-    - build_global_mkc_from_config / assemble_mkc / assemble_system_matrices_*
-        utilisent: L, T, MU, FRET_DXS_MM, APPLY_FIXED_BC,
-        DAMPING_MODES_REF, DAMPING_ZETAS_REF, DEBUG_RAYLEIGH(_LEVEL)
-- solver.py:
-    - définir la grille temporelle et intégrer: DT, T_SIM
-    - conditions initiales en pincement: PLUCK_POS, PLUCK_AMP
-    - FFT/figures: FFT_WINDOW, FFT_ZERO_PAD_FACTOR, et toute la famille FFT_LOG_*
-    - animations et profils statiques: ANIM_*, SNAPSHOTS_*
-
-Repères physiques
------------------
-- Fréquence fondamentale idéale: f1 = (1/(2L)) * sqrt(T/μ)
-- Vitesse d'onde: c = sqrt(T/μ)
-"""
+# Centralisation des paramètres pour la simulation FEM d'une corde vibrante
+#
+# Objectif: rassembler en un seul endroit tous les réglages (physique, maillage,
+# intégration, conditions initiales, sorties) pour ne pas modifier le cœur
+# `formulation.py` (M, K, C Rayleigh) et `solver.py` (validation, Newmark, FFT, figures/animations).
+#
+# Où ces paramètres sont utilisés
+# - formulation.py → build_global_mkc_from_config / assemble_mkc / assemble_system_matrices_*
+#   consomment: L, T, MU, FRET_DXS_MM, APPLY_FIXED_BC, DAMPING_MODES_REF, DAMPING_ZETAS_REF
+# - solver.py → DT, T_SIM, PLUCK_POS, PLUCK_AMP, FFT_WINDOW/FFT_ZERO_PAD_FACTOR/FFT_LOG_*, ANIM_*, SNAPSHOTS_*
+#
+# Repères physiques
+# - f1 idéale = (1/(2L)) * sqrt(T/μ)
+# - c (vitesse d'onde) = sqrt(T/μ)
 from __future__ import annotations
 from math import sqrt
 from pathlib import Path
@@ -185,54 +172,41 @@ COURANT_NUMBER: float = WAVE_SPEED * DT / DX
 # 3.1 Utilitaires pour gérer deux types de maillage (uniforme vs frettes)
 # ---------------------------------------------------------------------------
 def has_fret_mesh() -> bool:
-    """Retourne toujours True (maille frettes statique figée).
-
-    Utilisé par: diagnostics et helpers.
-    AVERTISSEMENT: N'affecte pas M/K/C ni l'intégration — purement informatif
-    """
+    # Retourne toujours True (maille frettes statique figée).
+    # Utilisé par diagnostics/helpers; n'affecte pas M/K/C ni l'intégration.
     return True
 
 
 def fret_n_elems() -> int:
-    """Nombre d'éléments de la maille frettes; sinon retombe sur N_ELEMS."""
+    # Nombre d'éléments de la maille frettes; sinon retombe sur N_ELEMS.
     if 'FRET_N_ELEMS' in globals():
         return globals()['FRET_N_ELEMS']  # type: ignore[index]
     return N_ELEMS
 
 
 def fret_n_nodes() -> int:
-    """Nombre de nœuds de la maille frettes; sinon retombe sur N_NODES."""
+    # Nombre de nœuds de la maille frettes; sinon retombe sur N_NODES.
     if 'FRET_N_NODES' in globals():
         return globals()['FRET_N_NODES']  # type: ignore[index]
     return N_NODES
 
 
 def fret_dx_vector_m() -> list[float] | None:
-    """Vecteur des dx (m) si maille frettes active; sinon None.
-
-    Utilisé par: formulation (assemblage non uniforme), solver (positions x).
-    """
+    # Vecteur des dx (m) si maille frettes active; sinon None.
+    # Utilisé par: formulation (assemblage non uniforme), solver (positions x).
     if has_fret_mesh():
         return [v / 1000.0 for v in globals()['FRET_DXS_MM']]  # type: ignore[index]
     return None
 
 
 def effective_dx_uniform() -> float:
-    """Retourne un DX uniforme de référence (m) — usage diagnostique.
-
-    AVERTISSEMENT: Diagnostic uniquement — n'affecte pas les calculs
-    """
+    # Retourne un DX uniforme de référence (m) — usage diagnostique uniquement.
     return DX
 
 
 def courant_number() -> float:
-    """Retourne un nombre de Courant estimé.
-
-    Si maille frettes: utilise le plus petit dx pour une estimation conservative.
-    Utilisé par summary() pour qualifier la stabilité temporelle.
-
-    AVERTISSEMENT: Indicateur d'analyse uniquement — n'impose pas de contrainte dans le solveur
-    """
+    # Retourne un nombre de Courant estimé (diagnostic).
+    # Maille frettes: utilise dx_min pour estimativa conservadora; usado por summary().
     fret_dxs = fret_dx_vector_m()
     if fret_dxs:
         dx_min = min(fret_dxs)
@@ -285,12 +259,15 @@ SNAPSHOTS_ALPHA = 0.9            # transparence des profils
 SNAPSHOTS_LINEWIDTH = 1.3        # épaisseur des lignes
 SNAPSHOTS_SHOW_LEGEND = False    # légende avec temps (utile si peu de profils)
 
-# Interrupteurs de debug pour les impressions Rayleigh
-# - Utilisé par: formulation (niveau de verbosité)
-# AVERTISSEMENT: Debug/prints uniquement — n'affectent pas les matrices ni l'intégration
-DEBUG_RAYLEIGH: bool = True
-DEBUG_RAYLEIGH_LEVEL: int = 1  # 1: summary; 2: include matrix blocks
+# Interrupteur central de débogage (impressions contrôlées globalement)
+# - Utilisé par: digital_twin.back_end.utils.debug (dbg.is_enabled())
+# - Mettre True pour activer les impressions de debug de tous les modules qui utilisent dbg
+# AVERTISSEMENT: Debug/prints uniquement — n'affecte pas les matrices ni l'intégration
+DEBUG_ENABLED: bool = True
 
+# Alias rétrocompatibilité: certains modules peuvent encore lire DEBUG_RAYLEIGH
+# (le module debug le considère si DEBUG_ENABLED n'est pas défini)
+DEBUG_RAYLEIGH: bool = DEBUG_ENABLED
 
 # =============================================================
 # 5.1. PARAMÈTRES DE FFT (consommés par solver)
@@ -328,12 +305,8 @@ ANIM_FPS_REAL: int = 30             # FPS du GIF « temps réel »
 # -------------------------------------------------------------
 
 def summary() -> str:
-    """Retourne une chaîne formatée résumant les paramètres actuels.
-
-    Utile pour vérifier rapidement ce qui sera consommé par formulation/solver.
-
-    AVERTISSEMENT: Fonction d'affichage/diagnostic — ne change pas les calculs
-    """
+    # Retourne une chaîne formatée résumant les paramètres actuels (diagnostic/affichage).
+    # Utile pour confirmer ce que formulation/solver consommerão.
     fret_mode = 'OUI' if has_fret_mesh() else 'NON'
     fret_dxs_m = fret_dx_vector_m()
     if fret_dxs_m and len(fret_dxs_m) > 0:
@@ -369,27 +342,18 @@ def summary() -> str:
 
 
 def apply_fret_mesh_runtime(*args, **kwargs) -> bool:  # type: ignore[unused-argument]
-    """(Obsolète) Conservée pour compatibilité — ne fait rien et retourne True.
-
-    AVERTISSEMENT: Compatibilité/aucun effet sur les calculs
-    """
+    # (Obsolète) Compatibilité — ne fait rien et retourne True.
     return True
 
 def export_fret_static(*args, **kwargs):  # type: ignore[unused-argument]
-    """(Obsolète) La maille est déjà intégrée statiquement; rien à exporter.
-
-    AVERTISSEMENT: Compatibilité/aucun effet sur les calculs
-    """
+    # (Obsolète) Maille déjà intégrée statiquement; rien à exporter (compatibilité).
     return None
 
 # --- Application automatique au moment de l'import du module ---
 # Pour désactiver ce comportement, définir la variable d'environnement
 # DT_DISABLE_AUTO_FRETS=1 avant d'importer ce module.
 def ensure_fret_mesh(*args, **kwargs) -> bool:  # type: ignore[unused-argument]
-    """Compatibilité : retourne toujours True (maille figée).
-
-    AVERTISSEMENT: Helper de compatibilité — n'affecte pas les calculs
-    """
+    # Compatibilité : retourne toujours True (maille figée). N'affecte pas les calculs.
     return True
 
 if __name__ == "__main__":
