@@ -1,99 +1,112 @@
-"""Centralisation des paramètres de la simulation FEM d'une corde vibrante.
+"""Centralisation des paramètres pour la simulation FEM d'une corde vibrante.
 
-Ce module permet de modifier facilement les paramètres physiques, numériques
-et de sortie sans toucher au cœur du code.
+Objectif
+--------
+Rassembler en un seul endroit tous les réglages de la simulation (physique,
+maillage, intégration temporelle, conditions initiales, sorties/visualisations)
+pour éviter de modifier le code cœur dans `formulation.py` (assemblage de M, K,
+et amortissement de Rayleigh C) et `solver.py` (validation, intégration Newmark,
+FFT, figures et animations).
 
-Sections :
-1. Paramètres physiques de la corde
-2. Amortissement (Rayleigh)
-3. Paramètres numériques de la simulation
-4. Conditions initiales (pincement / excitation)
-5. Paramètres de sortie
+Où ces paramètres sont utilisés
+-------------------------------
+- formulation.py:
+    - build_global_mkc_from_config / assemble_mkc / assemble_system_matrices_*
+        utilisent: L, T, MU, FRET_DXS_MM, APPLY_FIXED_BC,
+        DAMPING_MODES_REF, DAMPING_ZETAS_REF, DEBUG_RAYLEIGH(_LEVEL)
+- solver.py:
+    - définir la grille temporelle et intégrer: DT, T_SIM
+    - conditions initiales en pincement: PLUCK_POS, PLUCK_AMP
+    - FFT/figures: FFT_WINDOW, FFT_ZERO_PAD_FACTOR, et toute la famille FFT_LOG_*
+    - animations et profils statiques: ANIM_*, SNAPSHOTS_*
 
-Notes :
-- Fréquence fondamentale théorique d'une corde idéale : f1 = (1/(2L)) * sqrt(T/μ)
-- Vitesse de propagation de l'onde : c = sqrt(T/μ)
-- Ajuster N_NODES, DT et T_SIM selon le compromis précision / coût de calcul.
+Repères physiques
+-----------------
+- Fréquence fondamentale idéale: f1 = (1/(2L)) * sqrt(T/μ)
+- Vitesse d'onde: c = sqrt(T/μ)
 """
 from __future__ import annotations
-
 from math import sqrt
 from pathlib import Path
 
 # =============================================================
-# MODE MAILLE FRETTES STATIQUE (INLINE)
+# MODE MAILLE « FRETTES » STATIQUE (INLINE)
 # -------------------------------------------------------------
-# Nous figeons ici une discrétisation non uniforme (issue d'une génération
-# antérieure). Plus aucune génération dynamique ni cache JSON.
-# Si vous souhaitez régénérer : réintroduire temporairement le module
-# fret_mesh et remplacer le bloc ci-dessous.
+# Ce fichier contient une discrétisation non uniforme « figée » (liste de dx_i en mm).
+# - Utilisé par: formulation.build_global_mkc_from_config (assemblage non uniforme)
+#                solver.build_node_positions_from_config (positions x pour tracés)
+# - Pas de génération dynamique ici.
+#   Donc, pour régénérer, il faudrait brancher un générateur externe et remplacer la liste.
 # =============================================================
 _CONFIG_DIR = Path(__file__).resolve().parent  # conservé pour éventuelles sorties
 
 # =============================================================
 # 1. PARAMÈTRES PHYSIQUES DE LA CORDE
-#    Exemple : corde nylon (Note ~ B3 ≈ 247 Hz)
+#    Exemple : corde nylon (note ~ Si3 ≈ 247 Hz)
 # -------------------------------------------------------------
 # L  : Longueur de la corde (m)
 # T  : Tension (N)
 # MU : Densité linéique μ (kg/m)
 # -------------------------------------------------------------
-# Valeurs de référence (adapter si besoin) :
+# Valeurs de référence (adapter si besoin)
+# - Utilisé par: formulation (M,K), diagnostics et résumés
 L: float = 0.65          # 65 cm
 T: float = 60.0          # Newtons
 MU: float = 0.000582     # kg/m (0.5 g/m)
 
-# Fréquence fondamentale théorique (idéale, sans rigidité ni amortissement additionnel)
+# Fréquence fondamentale idéale (sans rigidité ni amortissement additionnel)
 # f1 = (1/(2L)) * sqrt(T/μ)
+# - Usage informatif (logs/résumé)
+# - AVERTISSEMENT: Diagnostic uniquement — n'affecte pas M, K, C ni l'intégration
 FUNDAMENTAL_FREQ_IDEAL: float = (1.0 / (2.0 * L)) * sqrt(T / MU)
 
 # Vitesse de propagation de l'onde dans la corde (m/s)
 # c = sqrt(T/μ)
+# - Utilisé pour diagnostics (nombre de Courant, etc.)
+# - AVERTISSEMENT: Diagnostic uniquement — n'affecte pas les calculs physiques
 WAVE_SPEED: float = sqrt(T / MU)
 
 # =============================================================
 # 2. AMORTISSEMENT (Rayleigh)
-#    C = ALPHA * M + BETA * K
+#    C = α M + β K (déduit automatiquement à partir de cibles modales)
 # -------------------------------------------------------------
-# ALPHA agit surtout sur les basses fréquences
-# BETA  agit surtout sur les hautes fréquences
-# Commencer avec des valeurs faibles et affiner empiriquement.
-#ALPHA: float = 0.045821 #2 * s * pi * 1/L * sqrt(T/μ) -> s < 1 (0,001 - 0,01)
-#BETA: float = 0.00
+# Paramètres cibles pour calculer (α, β): ζ(ω) = 1/2 (α/ω + β ω)
+# Résolution sur deux modes de référence p, q (indices 0-based)
+# - Utilisé par: formulation.rayleigh_damping via build_global_mkc_from_config
+DAMPING_MODES_REF: tuple[int, int] = (0, 3)
+DAMPING_ZETAS_REF: tuple[float, float] = (0.001, 0.001)
 
-# Nouvelles références modales pour calculer (alpha, beta) via Rayleigh
-# ζ(ω) = 1/2 (α/ω + β ω) résolu sur deux modes de référence p, q (0-based)
-DAMPING_MODES_REF: tuple[int, int] = (0, 1)
-DAMPING_ZETAS_REF: tuple[float, float] = (0.01, 0.02)
-
-# Conditions de bord (fixes aux extrémités)
+# Conditions de bord fixes aux extrémités (Dirichlet)
+# - Utilisé par: formulation (application des CL sur M,K, puis C)
 APPLY_FIXED_BC: bool = True
 
 # =============================================================
-# 3. PARAMÈTRES NUMÉRIQUES DE LA SIMULATION
+# 3. PARAMÈTRES NUMÉRIQUES DE LA SIMULATION (intégration temporelle)
 # -------------------------------------------------------------
 # N_NODES : Nombre total de nœuds (>= 2). Nombre d'éléments = N_NODES - 1.
 # T_SIM   : Durée totale de la simulation (s)
 # DT      : Pas de temps (s) — choisir petit pour stabilité & précision.
-N_NODES: int = 100          # Nombre de nœuds (>=2)
-T_SIM: float = 2.0          # secondes
-DT: float = 1.0e-5          # pas du temps
+N_NODES: int = 100          # Alias historique; la maille frettes fixe N_NODES effectif
+T_SIM: float = 2.0          # Durée totale — utilisé par solver
+DT: float = 1.0e-4          # Pas de temps — utilisé par solver et FFT
 
 # -------------------------------------------------------------------------
-# PARAMÈTRE GÉOMÉTRIQUE FRETTES
+# PARAMÈTRE GÉOMÉTRIQUE FRETTES (référence documentaire)
 # -------------------------------------------------------------------------
 # Exposant géométrique utilisé pour calculer les positions des divisions
 # (frettes) le long de la corde : formule générique
 #   pos_n = L * (1 - 1 / 2**(n / FRET_EXPOSANT_GEOMETRIQUE))
 # Classique 12-TET -> 12 ; expérimental (ici) -> 8.
-FRET_EXPOSANT_GEOMETRIQUE: float = 12.0
+FRET_EXPOSANT_GEOMETRIQUE: float = 12.0  # indicatif; non utilisé directement (maille figée)
+# AVERTISSEMENT: Sans effet sur les calculs tant que la maille reste figée
 
 # -------------------------------------------------------------------------
-# MAILLE FRETTES FIGÉE
+# MAILLE FRETTES FIGÉE (dx_i en millimètres)
 # -------------------------------------------------------------------------
-# Liste des longueurs élémentaires en millimètres (dx_i). Provenance :
-# générée par l'ancien algorithme (date d'intégration statique).
-# NOTE: Si vous modifiez L, vérifiez la cohérence avec la somme ci-dessous.
+# Liste des longueurs élémentaires en millimètres (dx_i)
+# - Utilisé par: formulation.build_global_mkc_from_config (converti en mètres)
+#                solver.build_node_positions_from_config (positions x)
+# NOTE: si vous modifiez L, vérifiez la cohérence avec la somme.
 FRET_DXS_MM: list[float] = [
     # Liste régénérée (expoente=12.0, dx_alvo≈6.0 mm) le 2025-10-06.
     # Total éléments: 51 ; Somme ≈ 325.01 mm (couvre jusqu'à la 12e frette, pas la longueur totale L=650 mm).
@@ -130,8 +143,13 @@ FRET_DXS_MM: list[float] = [
     6.63, 6.63, 6.63, 6.63, 6.63, 6.63, 6.63, 6.63, 6.63     
 ]
 
-FRET_N_ELEMS: int = len(FRET_DXS_MM)
-FRET_N_NODES: int = FRET_N_ELEMS + 1
+# Informations sur la maille frettes
+# - Calculées à partir de FRET_DXS_MM
+#   pour connaître le nombre d'éléments/nœuds et les positions x
+# NOTE: Si vous modifiez FRET_DXS_MM, ces valeurs sont recalculées automatiquement.
+# NOTE: Le nombre de noeuds sont nombre d'éléments + 1 parce que chaque élément a deux nœuds.
+FRET_N_ELEMS: int = len(FRET_DXS_MM)            # Nombre d'éléments (segments)
+FRET_N_NODES: int = FRET_N_ELEMS + 1            # Nombre de nœuds dans la maille frettes
 
 # Positions cumulées en millimètres (node_positions[0] = 0)
 FRET_NODE_POSITIONS_MM: list[float] = [0.0]
@@ -141,62 +159,79 @@ for _dx in FRET_DXS_MM:
     FRET_NODE_POSITIONS_MM.append(_acc)
 FRET_TOTAL_LENGTH_MM: float = FRET_NODE_POSITIONS_MM[-1]
 
-# Vérification de cohérence avec L (tolérance relative 1%)
+# Vérification de cohérence avec L (tolérance relative 1%) — avertissement seulement
 _length_m_recon = FRET_TOTAL_LENGTH_MM / 1000.0
 if abs(_length_m_recon - L) / L > 0.01:
     # Avertissement simple (ne lève pas d'exception pour rester robuste)
+    # AVERTISSEMENT: Affichage d'un message uniquement — n'interrompt pas les calculs
     print(f"[AVERTISSEMENT] Longueur reconstruite {_length_m_recon:.6f} m ≠ L={L:.6f} m (>1%).")
 
-# DX moyen (utile pour diagnostics uniquement)
+# DX moyen (diagnostic)
+# AVERTISSEMENT: Diagnostic uniquement — n'affecte pas l'assemblage ni l'intégration
 DX: float = _length_m_recon / FRET_N_ELEMS if FRET_N_ELEMS else L
 
 # Alias historiques pour compatibilité avec code existant
 N_ELEMS: int = FRET_N_ELEMS
 N_NODES: int = FRET_N_NODES
 
-N_STEPS: int = int(T_SIM / DT)      # Nombre de pas de temps simulés
+N_STEPS: int = int(T_SIM / DT)      # Nombre de pas de temps simulés (logs)
+# AVERTISSEMENT: Utilisé pour logs/affichage; n'influence pas la simulation
 
-# (Optionnel) Critère de Courant (1D) pour maille uniforme : c * DT / DX <= ~1
+# Critère de Courant (1D) indicatif: c * DT / DX <= ~1
+# AVERTISSEMENT: Indicateur de stabilité (diagnostic) — n'impose aucune contrainte au code
 COURANT_NUMBER: float = WAVE_SPEED * DT / DX
 
 # ---------------------------------------------------------------------------
 # 3.1 Utilitaires pour gérer deux types de maillage (uniforme vs frettes)
 # ---------------------------------------------------------------------------
 def has_fret_mesh() -> bool:
-    """Retourne toujours True (maille frettes statique figée)."""
+    """Retourne toujours True (maille frettes statique figée).
+
+    Utilisé par: diagnostics et helpers.
+    AVERTISSEMENT: N'affecte pas M/K/C ni l'intégration — purement informatif
+    """
     return True
 
 
 def fret_n_elems() -> int:
-    """Nombre d'éléments de la maille frettes si présente sinon maille uniforme."""
+    """Nombre d'éléments de la maille frettes; sinon retombe sur N_ELEMS."""
     if 'FRET_N_ELEMS' in globals():
         return globals()['FRET_N_ELEMS']  # type: ignore[index]
     return N_ELEMS
 
 
 def fret_n_nodes() -> int:
-    """Nombre de nœuds de la maille frettes si présente sinon uniforme."""
+    """Nombre de nœuds de la maille frettes; sinon retombe sur N_NODES."""
     if 'FRET_N_NODES' in globals():
         return globals()['FRET_N_NODES']  # type: ignore[index]
     return N_NODES
 
 
 def fret_dx_vector_m() -> list[float] | None:
-    """Vecteur des dx (m) si maille frettes active, sinon None (maille uniforme)."""
+    """Vecteur des dx (m) si maille frettes active; sinon None.
+
+    Utilisé par: formulation (assemblage non uniforme), solver (positions x).
+    """
     if has_fret_mesh():
         return [v / 1000.0 for v in globals()['FRET_DXS_MM']]  # type: ignore[index]
     return None
 
 
 def effective_dx_uniform() -> float:
-    """Retourne le DX uniforme de référence (m)."""
+    """Retourne un DX uniforme de référence (m) — usage diagnostique.
+
+    AVERTISSEMENT: Diagnostic uniquement — n'affecte pas les calculs
+    """
     return DX
 
 
 def courant_number() -> float:
     """Retourne un nombre de Courant estimé.
 
-    Si maille frettes : utilise le plus petit dx pour une estimation conservative.
+    Si maille frettes: utilise le plus petit dx pour une estimation conservative.
+    Utilisé par summary() pour qualifier la stabilité temporelle.
+
+    AVERTISSEMENT: Indicateur d'analyse uniquement — n'impose pas de contrainte dans le solveur
     """
     fret_dxs = fret_dx_vector_m()
     if fret_dxs:
@@ -207,25 +242,98 @@ def courant_number() -> float:
 # =============================================================
 # 4. CONDITIONS INITIALES (PINÇAGE)
 # -------------------------------------------------------------
-# PLUCK_POS : Fraction de la longueur où la corde est pincée initialement (0 < x < 1)
+# - Utilisé par: solver.inicializar_estados_iniciais / inicializar_u0_triangulo
+# PLUCK_POS : Fraction de la longueur où la corde est pincée (0 < x < 1)
 # PLUCK_AMP : Amplitude initiale (m)
-PLUCK_POS: float = 0.30    # 30% de L
-PLUCK_AMP: float = 0.005   # 5 mm
+PLUCK_POS: float = 0.1    # 10% de L
+PLUCK_AMP: float = 0.003  # 3 mm
 
 # =============================================================
-# 5. PARAMÈTRES DE SORTIE
+# 5. PARAMÈTRES DE SORTIE/TRACE
 # -------------------------------------------------------------
+# - Utilisé par: solver (séries temporelles, FFT, figures/animations)
 # FILENAME    : Nom de base des fichiers de sortie (sans extension)
-# OUTPUT_NODE : Indice du nœud dont on extrait le "signal" (ex : milieu de la corde)
+# OUTPUT_NODE : Indice du nœud d'où est extrait le signal (ex.: milieu)
+# AVERTISSEMENT: Contrôles d'E/S uniquement — n'affectent pas les calculs physiques
 FILENAME: str = "simulacao_corda"
-OUTPUT_NODE: int = N_NODES // 2
+OUTPUT_NODE: int = N_NODES // 2  # nœud central (indice 0-based)
+
+# Contrôles d'animation (GIF/MP4) — utilisés par solver.animate_string_motion
+# AVERTISSEMENT: Visualisation uniquement — n'affecte pas M/K/C ou Newmark
+# - ANIM_FPS: images/s du fichier final
+# - ANIM_FRAME_STEP: pas des trames échantillonnées (None -> auto)
+# - ANIM_VIDEO_DURATION_S: durée cible; si définie, rééchantillonne pour coller à cette durée
+ANIM_FPS: int = 30
+ANIM_FRAME_STEP: int | None = 50
+ANIM_VIDEO_DURATION_S: float | None = None  # Ex.: 5.0 pour une vidéo ~5 s
+
+# Zoom/limites pour animation (ANIM_Y_SCALE > 1.0 = « zoom out »)
+# Limites Y basées sur les percentiles 1–99 et marge ANIM_Y_PAD_FRAC
+ANIM_Y_SCALE: float = 2          # facteur d'échelle vertical (None = auto)
+ANIM_Y_PAD_FRAC: float = 0.08    # marge verticale relative
+
+# Captures statiques (PNG) — utilisées par solver.plot_snapshots_png
+# AVERTISSEMENT: Visualisation uniquement — n'affecte pas les calculs
+SNAPSHOTS_COUNT: int = 8         # nombre de captures (uniformément réparties)
+SNAPSHOTS_DECIM: int = 10        # décimation temporelle avant sélection
+SNAPSHOTS_T_WINDOW = None        # ex.: (0.0, 0.2) pour limiter la plage temporelle
+SNAPSHOTS_Y_SCALE = 1.5          # facteur d'échelle vertical (None = auto)
+SNAPSHOTS_Y_PAD_FRAC = 0.06      # marge verticale relative
+SNAPSHOTS_USE_COLORBAR = True    # barre de couleur mappée au temps
+SNAPSHOTS_CMAP = "viridis"       # colormap pour les profils (si pas de colorbar, sinon viridis)
+SNAPSHOTS_ALPHA = 0.9            # transparence des profils
+SNAPSHOTS_LINEWIDTH = 1.3        # épaisseur des lignes
+SNAPSHOTS_SHOW_LEGEND = False    # légende avec temps (utile si peu de profils)
+
+# Interrupteurs de debug pour les impressions Rayleigh
+# - Utilisé par: formulation (niveau de verbosité)
+# AVERTISSEMENT: Debug/prints uniquement — n'affectent pas les matrices ni l'intégration
+DEBUG_RAYLEIGH: bool = True
+DEBUG_RAYLEIGH_LEVEL: int = 1  # 1: summary; 2: include matrix blocks
+
+
+# =============================================================
+# 5.1. PARAMÈTRES DE FFT (consommés par solver)
+# -------------------------------------------------------------
+# AVERTISSEMENT (FFT): Tous les paramètres de cette section influencent uniquement l'analyse/les graphiques
+# et ne modifient pas l'intégration temporelle ni les matrices M/K/C.
+# Contrôles généraux (FFT linéaire et dB)
+FFT_WINDOW: str = "hann"           # fenêtre: hann, hamming, blackman, flattop, etc.
+FFT_ZERO_PAD_FACTOR: float = 1.0    # >=1.0; zero-padding pour raffiner l'échantillonnage en fréquence
+
+# Tracé FFT à axe de fréquence logarithmique (zone remplie en dB)
+FFT_LOG_FMIN: float = 30.0          # Hz (log nécessite fmin > 0)
+FFT_LOG_FMAX: float | None = None   # Hz (None -> Nyquist)
+FFT_LOG_MIN_DB: float = -90.0       # plancher dB pour l'affichage
+FFT_LOG_SMOOTH: int = 0             # lissage (échantillons) avant dB; 0 = off
+FFT_LOG_USE_VELOCITY: bool = False  # utiliser la vitesse au lieu du déplacement
+FFT_LOG_COLOR: str = "#4c78a8"      # couleur de remplissage
+FFT_LOG_DB_OFFSET: float = 0.0      # décalage vertical (dB) pour alignement visuel
+FFT_LOG_BINS_PER_OCTAVE: int | None = None  # rééchantillonnage log (bins/octave); None = off
+FFT_LOG_OCTAVE_SMOOTH: float = 0.0  # lissage fraction d'octave (en octaves)
+FFT_LOG_SMOOTH_DOMAIN: str = "db"   # "db" (par défaut) ou "linear"
+
+# =============================================================
+# 5.2. PARAMÈTRES D'ANIMATION ADDITIONNELS
+# -------------------------------------------------------------
+# Contrôles spécifiques pour deux GIFs générés par solver
+# AVERTISSEMENT: Visualisation uniquement — n'affecte pas les résultats physiques
+ANIM_DECIM_SLOW: int = 5            # décimation pour le GIF au ralenti
+ANIM_FPS_SLOW: int = 33             # FPS du GIF au ralenti
+ANIM_FPS_REAL: int = 30             # FPS du GIF « temps réel »
+
 
 # =============================================================
 # 6. FONCTIONS AUXILIAIRES (optionnel)
 # -------------------------------------------------------------
 
 def summary() -> str:
-    """Retourne une chaîne formatée résumant les paramètres actuels."""
+    """Retourne une chaîne formatée résumant les paramètres actuels.
+
+    Utile pour vérifier rapidement ce qui sera consommé par formulation/solver.
+
+    AVERTISSEMENT: Fonction d'affichage/diagnostic — ne change pas les calculs
+    """
     fret_mode = 'OUI' if has_fret_mesh() else 'NON'
     fret_dxs_m = fret_dx_vector_m()
     if fret_dxs_m and len(fret_dxs_m) > 0:
@@ -261,21 +369,30 @@ def summary() -> str:
 
 
 def apply_fret_mesh_runtime(*args, **kwargs) -> bool:  # type: ignore[unused-argument]
-    """(Obsolète) Conservée pour compatibilité — ne fait rien et retourne True."""
+    """(Obsolète) Conservée pour compatibilité — ne fait rien et retourne True.
+
+    AVERTISSEMENT: Compatibilité/aucun effet sur les calculs
+    """
     return True
 
 def export_fret_static(*args, **kwargs):  # type: ignore[unused-argument]
-    """(Obsolète) La maille est déjà intégrée statiquement; rien à exporter."""
+    """(Obsolète) La maille est déjà intégrée statiquement; rien à exporter.
+
+    AVERTISSEMENT: Compatibilité/aucun effet sur les calculs
+    """
     return None
 
 # --- Application automatique au moment de l'import du module ---
 # Pour désactiver ce comportement, définir la variable d'environnement
 # DT_DISABLE_AUTO_FRETS=1 avant d'importer ce module.
 def ensure_fret_mesh(*args, **kwargs) -> bool:  # type: ignore[unused-argument]
-    """Compatibilité : retourne toujours True (maille figée)."""
+    """Compatibilité : retourne toujours True (maille figée).
+
+    AVERTISSEMENT: Helper de compatibilité — n'affecte pas les calculs
+    """
     return True
 
 if __name__ == "__main__":
-    # Uso manual: garantir malha e mostrar resumo.
+    # Usage manuel: imprimer un résumé lisible.
     print("[INFO] Mode frettes statique (inline).")
     print(summary())

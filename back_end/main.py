@@ -1,120 +1,231 @@
-"""Script principal d'exécution de la simulation de la corde.
+"""Backend simulation entry point.
 
-Flux général :
- 1. Charge les paramètres depuis `config`.
- 2. Assemble les matrices globales M, K, C (FEM 1D uniforme).
- 3. Effectue l'intégration temporelle et récupère l'historique de déplacement d'un nœud.
- 4. Sauvegarde les graphiques (forme d'onde et spectre FFT) dans `back_end/results/plots`.
-
-Remarque : le répertoire de sortie est interne à `digital_twin/back_end/results` pour éviter d'encombrer la racine.
-Audio : génération WAV désactivée (placeholder) – possibilité d'ajouter plus tard un export.
+Runs the non-uniform string FEM simulation using the Rayleigh damping setup
+from config, integrates with Newmark-beta, and saves plots/animation.
 """
-
 from __future__ import annotations
 
 from pathlib import Path
+import numpy as np
 
-from . import config  # Paramètres globaux (longueur, tension, maillage, etc.)
-from .fem.formulation import (
-    assemble_system_matrices,
-    assemble_system_matrices_nonuniform,
-)
-from .fem.solver import run_time_simulation
-from .utils.utils import plot_waveform, plot_fft, create_animation
-
-
-BASE_DIR = Path(__file__).resolve().parent      # Répertoire back_end
-RESULTS_ROOT = BASE_DIR / "results"            # Racine des sorties
-PLOTS_DIR = RESULTS_ROOT / "plots"             # Dossier des figures
-AUDIO_DIR = RESULTS_ROOT / "audio"             # Dossier de l'audio (placeholder)
-
-
-def _ensure_dirs():
-    """Crée les dossiers de sortie si nécessaire (idempotent)."""
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)  # Crée hiérarchie si absent
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def main():
-    _ensure_dirs()
-
-    print("[1/5] Assemblage des matrices M, K, C ...")  # Étape 1 : construction FEM
-    # Détection d'une maille non uniforme provenant du module de frettes.
-    fret_dx_mm = config.FRET_DXS_MM  # Liste de dx en mm si maillage frettes
-    modes_ref = config.DAMPING_MODES_REF
-    zetas_ref = config.DAMPING_ZETAS_REF
-    apply_bc = config.APPLY_FIXED_BC
-    if fret_dx_mm:  # Liste non vide => mode frettes actif
-        dx_vector_m = [v / 1000.0 for v in fret_dx_mm]  # Conversion en mètres
-        M, K, C = assemble_system_matrices_nonuniform(
-            dx_vector=dx_vector_m,
-            tension=config.T,
-            lin_density=config.MU,
-            damping_modes_ref=modes_ref,
-            damping_zetas_ref=zetas_ref,
-            apply_fixed_bc=apply_bc,
-        )
-        n_nodes_effectif = len(dx_vector_m) + 1
-        length_effective = sum(dx_vector_m)
-        print(
-            f"    -> Maille frettes détectée: n_elems={len(dx_vector_m)}, n_nodes={n_nodes_effectif}, L≈{length_effective:.6f} m"
-        )
-    else:  # Fallback : maillage uniforme
-        M, K, C = assemble_system_matrices(
-            n_nodes=config.N_NODES,
-            length=config.L,
-            tension=config.T,
-            lin_density=config.MU,
-            damping_modes_ref=modes_ref,
-            damping_zetas_ref=zetas_ref,
-            apply_fixed_bc=apply_bc,
-        )
-        n_nodes_effectif = config.N_NODES
-        length_effective = config.L
-        print("    -> Maille uniforme utilisée.")
-
-    print("[2/5] Intégration temporelle ...")  # Étape 2 : schéma explicite central
-    sim_result = run_time_simulation(
-        M=M,
-        K=K,
-        C=C,
-        pluck_position_ratio=config.PLUCK_POS,
-        pluck_amplitude=config.PLUCK_AMP,
-        length=length_effective,
-        n_nodes=n_nodes_effectif,
-        sim_time=config.T_SIM,
-        dt=config.DT,
-        output_node=config.OUTPUT_NODE,
-        return_full=True,
+try:
+    from digital_twin.back_end import config as _cfg  # type: ignore
+    from digital_twin.back_end.fem.formulation import build_global_mkc_from_config  # type: ignore
+    from digital_twin.back_end.fem.solver import (
+        validar_mck,
+        definir_parametros_simulacao,
+        inicializar_estados_iniciais,
+        calcular_u1,
+        compute_modal_frequencies_and_modes,
+        build_node_positions_from_config,
+        plot_first_modes,
+        zero_force_provider,
+        newmark_beta,
+        compute_energies_over_time,
+        plot_fft_png,
+        animate_string_motion,
+        save_string_frame_png,
+        plot_snapshots_png,
     )
-    history, full_history = sim_result  # unpack
-    print("    -> Intégration terminée.")
-
-    print("[3/5] (Audio) - Étape sautée (placeholder)")  # Étape 3 : audio non implémenté
-    sample_rate = int(1.0 / config.DT)
-
-    print("[4/5] Génération des graphiques ...")  # Étape 4 : figures temporelles + spectre
-    waveform_path = PLOTS_DIR / f"{config.FILENAME}_waveform.png"
-    fft_path = PLOTS_DIR / f"{config.FILENAME}_fft.png"
-    plot_waveform(history, sample_rate=sample_rate, filepath=waveform_path, title="Déplacement du nœud")
-    plot_fft(history, sample_rate=sample_rate, filepath=fft_path, title="Spectre (FFT)", freq_limit=2000)
-    print(f"    -> Graphiques sauvegardés dans {PLOTS_DIR}")
-
-    # Animation (déplacement spatio-temporel)
-    print("[5/5] Génération de l'animation MP4 ...")
-    anim_path = PLOTS_DIR / f"{config.FILENAME}_animation.mp4"  # Nom en français
-    create_animation(
-        full_history,
-        length=length_effective,
-        dt=config.DT,
-        filepath=anim_path,
-        frame_step=50,  # Saut de frames pour limiter taille
-        fps=30,
+except ModuleNotFoundError:
+    # Fallback when executed as a standalone script (ensure workspace root on sys.path)
+    import sys as _sys
+    ROOT = Path(__file__).resolve().parents[2]
+    if str(ROOT) not in _sys.path:
+        _sys.path.insert(0, str(ROOT))
+    from digital_twin.back_end import config as _cfg  # type: ignore
+    from digital_twin.back_end.fem.formulation import build_global_mkc_from_config  # type: ignore
+    from digital_twin.back_end.fem.solver import (
+        validar_mck,
+        definir_parametros_simulacao,
+        inicializar_estados_iniciais,
+        calcular_u1,
+        compute_modal_frequencies_and_modes,
+        build_node_positions_from_config,
+        plot_first_modes,
+        zero_force_provider,
+        newmark_beta,
+        compute_energies_over_time,
+        plot_fft_png,
+        animate_string_motion,
+        save_string_frame_png,
+        plot_snapshots_png,
     )
-    print(f"    -> Animation (si ffmpeg disponible) : {anim_path}")
 
-    print("Simulation terminée avec succès.")  # Fin de pipeline
+
+def main() -> None:
+    ROOT = Path(__file__).resolve().parents[2]
+    # Build M, K, C from config (frets mesh mandatory here)
+    res = build_global_mkc_from_config(apply_fixed_bc=True, return_meta=True)
+    if not (isinstance(res, tuple) and len(res) >= 3):
+        raise RuntimeError("Retorno inesperado de build_global_mkc_from_config")
+    if len(res) == 4:
+        M, K, C, meta = res
+    else:
+        M, K, C = res[:3]
+        meta = {}
+    print("[INFO] Matrizes montadas a partir do config.")
+
+    # Validate shapes, symmetry and boundary conditions
+    validar_mck(M, C, K, verbose=True)
+
+    # Simulation parameters
+    delta_t = float(getattr(_cfg, "DT", 1e-5))
+    T_total = float(getattr(_cfg, "T_SIM", 0.1))
+    definir_parametros_simulacao(delta_t, T_total)
+
+    # Initial conditions: triangular pluck at position PLUCK_POS * L with amplitude PLUCK_AMP
+    L_eff = float(getattr(_cfg, "L", 1.0))
+    h_eff = float(getattr(_cfg, "PLUCK_AMP", 0.0))
+    x_p_rel = float(getattr(_cfg, "PLUCK_POS", 0.25))
+    x_p = x_p_rel * L_eff
+    U0, U_nm1, U_n = inicializar_estados_iniciais(M, L=L_eff, h=h_eff, x_p=x_p)
+    print(f"U0 inicializado: shape={U0.shape}, max={np.nanmax(U0):.3e}, min={np.nanmin(U0):.3e}")
+
+    # First step via central differences (diagnostic)
+    _ = calcular_u1(M, C, K, U_n=U_n, U_nm1=U_nm1, delta_t=delta_t)
+
+    # Modal analysis and plot of first modes
+    n = M.shape[0]
+    x_coords = build_node_positions_from_config(n)
+    freqs_hz, modes_full = compute_modal_frequencies_and_modes(M, K, num_modes=4)
+    print("Primeiras frequências (Hz):", np.round(freqs_hz, 3))
+    plots_dir = ROOT / "digital_twin" / "back_end" / "results" / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    plot_first_modes(x_coords, modes_full, freqs_hz, max_modes=4, savepath=str(plots_dir / "modes_first4.png"))
+
+    # Newmark-beta integration with zero external force
+    V0_zero = np.zeros(n, dtype=float)
+    F_zero = zero_force_provider(n)
+    t_vec, U_hist, V_hist, A_hist = newmark_beta(M, C, K, F_zero, dt=delta_t, t_max=T_total, U0=U0, V0=V0_zero, A0=None)
+
+    # Displacement over time for a representative node
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+    except Exception as _eplt:  # pragma: no cover
+        print("[AVISO] matplotlib indisponível para plot de x(t):", _eplt)
+    else:
+        node_idx = max(1, n // 3)
+        plt.figure(figsize=(8, 4))
+        plt.plot(t_vec, U_hist[node_idx, :], lw=1.2)
+        plt.title(f"Deslocamento no nó {node_idx} — Newmark (β=1/4, γ=1/2), U0 triang (pincamento), F=0")
+        plt.xlabel("tempo (s)")
+        plt.ylabel("x (m)")
+        plt.grid(True, alpha=0.3)
+        outp = plots_dir / "newmark_node_displacement.png"
+        plt.tight_layout(); plt.savefig(outp, dpi=150); plt.close()
+        print(f"[INFO] Plot de x(t) salvo em: {outp}")
+
+        # Energies
+        Ek, Ep, Et = compute_energies_over_time(M, K, U_hist, V_hist)
+        plt.figure(figsize=(9, 5))
+        plt.plot(t_vec, Ek, label="E cinética")
+        plt.plot(t_vec, Ep, label="E potencial")
+        plt.plot(t_vec, Et, label="E total", lw=1.8)
+        plt.title("Energias ao longo do tempo")
+        plt.xlabel("tempo (s)")
+        plt.ylabel("energia (J)")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        outpE = plots_dir / "newmark_energies.png"
+        plt.tight_layout(); plt.savefig(outpE, dpi=150); plt.close()
+        print(f"[INFO] Plot de energias salvo em: {outpE}")
+
+    # FFT at output node
+    out_node = int(getattr(_cfg, "OUTPUT_NODE", max(1, n // 2)))
+    out_node = max(0, min(n - 1, out_node))
+    fft_path = plots_dir / "newmark_output_fft.png"
+    plot_fft_png(U_hist[out_node, :], delta_t, str(fft_path), title=f"FFT — nó {out_node}", fmax=None)
+
+    # Animation and first-frame PNG
+    anim_path = plots_dir / "string_motion.gif"
+    try:
+        _y_scale = float(getattr(_cfg, "ANIM_Y_SCALE", 1.0))
+        _y_pad = float(getattr(_cfg, "ANIM_Y_PAD_FRAC", 0.05))
+    except Exception:
+        _y_scale, _y_pad = 1.0, 0.05
+    animate_string_motion(
+        x_coords,
+        U_hist,
+        interval_ms=30,
+        decim=5,
+        savepath=str(anim_path),
+        show=False,
+        y_scale=_y_scale,
+        y_pad_frac=_y_pad,
+    )
+    png0 = plots_dir / "string_motion_t0.png"
+    try:
+        _frame_y_scale = getattr(_cfg, "ANIM_Y_SCALE", None)
+    except Exception:
+        _frame_y_scale = None
+    save_string_frame_png(x_coords, U_hist, frame_idx=0, savepath=str(png0), y_scale=_frame_y_scale, y_pad_frac=_y_pad)
+
+    # Static multi-time snapshots PNG
+    try:
+        n_snap = int(getattr(_cfg, "SNAPSHOTS_COUNT", 8))
+        snap_decim = int(getattr(_cfg, "SNAPSHOTS_DECIM", 10))
+    except Exception:
+        n_snap, snap_decim = 8, 10
+    try:
+        _snap_y_scale = getattr(_cfg, "SNAPSHOTS_Y_SCALE", None)
+        _snap_y_pad = float(getattr(_cfg, "SNAPSHOTS_Y_PAD_FRAC", 0.06))
+        _snap_t_window = getattr(_cfg, "SNAPSHOTS_T_WINDOW", None)
+        _snap_use_cbar = bool(getattr(_cfg, "SNAPSHOTS_USE_COLORBAR", True))
+        _snap_cmap = str(getattr(_cfg, "SNAPSHOTS_CMAP", "viridis"))
+        _snap_alpha = float(getattr(_cfg, "SNAPSHOTS_ALPHA", 0.9))
+        _snap_lw = float(getattr(_cfg, "SNAPSHOTS_LINEWIDTH", 1.3))
+        _snap_show_legend = bool(getattr(_cfg, "SNAPSHOTS_SHOW_LEGEND", False))
+    except Exception:
+        _snap_y_scale = None
+        _snap_y_pad = 0.06
+        _snap_t_window = None
+        _snap_use_cbar = True
+        _snap_cmap = "viridis"
+        _snap_alpha = 0.9
+        _snap_lw = 1.3
+        _snap_show_legend = False
+    snap_path = plots_dir / "string_snapshots.png"
+    plot_snapshots_png(
+        x_coords,
+        U_hist,
+        t_vec,
+        n_snapshots=n_snap,
+        decim=snap_decim,
+        savepath=str(snap_path),
+        title="Perfis da corda em tempos selecionados",
+        y_scale=_snap_y_scale,
+        y_pad_frac=_snap_y_pad,
+        t_window=_snap_t_window,
+        use_colorbar=_snap_use_cbar,
+        cmap=_snap_cmap,
+        alpha=_snap_alpha,
+        linewidth=_snap_lw,
+        show_legend=_snap_show_legend,
+    )
 
 
 if __name__ == "__main__":
     main()
+"""Ce fichier foi removido do pipeline a pedido do usuário.
+
+Mantemos apenas:
+ - back_end/fem/formulation.py
+ - back_end/fem/solver.py
+ - back_end/mesh/calcul_trous_de_frette.py
+ - back_end/mesh/fret_mesh.py
+ - back_end/config.py
+ - back_end/__init__.py
+
+Qualquer uso deste arquivo deve ser interrompido. Ele permanece apenas como stub
+para evitar imports quebrados em ambientes antigos.
+"""
+
+import sys
+
+def _removed_entrypoint() -> None:  # pragma: no cover
+    print("[INFO] main.py removido durante a limpeza. Use apenas formulation/solver/mesh/config.")
+    raise SystemExit(0)
+
+if __name__ == "__main__":  # pragma: no cover
+    _removed_entrypoint()

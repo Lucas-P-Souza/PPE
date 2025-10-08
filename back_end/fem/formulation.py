@@ -64,6 +64,51 @@ __all__ = [
     "rayleigh_damping",
 ]
 
+# ---------------------------------------------------------------------------
+# Debug controls (can be overridden in digital_twin.back_end.config)
+# ---------------------------------------------------------------------------
+try:
+    from .. import config as _cfg  # type: ignore
+    _DEBUG_RAYLEIGH: bool = bool(getattr(_cfg, "DEBUG_RAYLEIGH", True))
+    _DEBUG_RAYLEIGH_LEVEL: int = int(getattr(_cfg, "DEBUG_RAYLEIGH_LEVEL", 1))
+except Exception:
+    # Enabled by default per user request; set to False to silence
+    _DEBUG_RAYLEIGH = True
+    _DEBUG_RAYLEIGH_LEVEL = 1
+
+
+def _matrix_stats(name: str, M: np.ndarray) -> None:
+    try:
+        nz = np.count_nonzero(np.abs(M) > 0)
+        tot = M.size
+        frac = (nz / tot * 100.0) if tot else 0.0
+        print(f"[DEBUG] {name}: shape={M.shape}, nnz={nz} ({frac:.1f}%), fro={np.linalg.norm(M, 'fro'):.3e}, min={M.min():.3e}, max={M.max():.3e}")
+    except Exception as e:
+        print(f"[DEBUG] {name}: stats error: {e}")
+
+
+def _print_blocks(name: str, M: np.ndarray, k: int = 4) -> None:
+    try:
+        k = int(max(1, k))
+        tl = M[:k, :k]
+        br = M[-k:, -k:]
+        with np.printoptions(precision=3, suppress=True):
+            print(f"[DEBUG] {name} top-left {k}x{k}:\n{tl}")
+            print(f"[DEBUG] {name} bottom-right {k}x{k}:\n{br}")
+    except Exception as e:
+        print(f"[DEBUG] {name}: block print error: {e}")
+
+
+def _print_bc_edges(name: str, M: np.ndarray) -> None:
+    try:
+        r0 = float(np.sum(np.abs(M[0, :])))
+        rn = float(np.sum(np.abs(M[-1, :])))
+        c0 = float(np.sum(np.abs(M[:, 0])))
+        cn = float(np.sum(np.abs(M[:, -1])))
+        print(f"[DEBUG] {name} edge sums: row0={r0:.3e}, rowN={rn:.3e}, col0={c0:.3e}, colN={cn:.3e}")
+    except Exception as e:
+        print(f"[DEBUG] {name}: edge sums error: {e}")
+
 def _detect_constrained_dofs(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
     """Détecte les DDL contraints (CL de type Dirichlet appliquées via diag=1, lignes/colonnes nulles).
 
@@ -87,6 +132,36 @@ def _detect_constrained_dofs(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) 
         ):
             constrained.append(i)
     return np.asarray(constrained, dtype=int)
+
+def _apply_fixed_bc_inplace(mat: np.ndarray) -> None:
+        """
+        Applique des conditions aux limites fixes (Dirichlet) sur place.
+
+        Stratégie :
+            - Annule les lignes/colonnes des nœuds extrêmes.
+            - Met la diagonale à 1 sur ces nœuds pour rendre la matrice inversible
+                (utile pour solveurs linéaires simples / élimination).
+        """
+        mat[0, :] = 0.0
+        mat[-1, :] = 0.0
+        mat[:, 0] = 0.0
+        mat[:, -1] = 0.0
+        mat[0, 0] = 1.0
+        mat[-1, -1] = 1.0
+
+def _apply_fixed_bc_inplace_damping(mat: np.ndarray) -> None:
+    """
+    Applique des conditions aux limites sur la matrice d'amortissement C.
+
+    Différence clé par rapport à _apply_fixed_bc_inplace:
+    - On ANNULE les lignes/colonnes des nœuds extrêmes, mais on NE met PAS
+      la diagonale à 1. Pour C, il n'est pas nécessaire (ni souhaitable)
+      d'introduire des termes artificiels sur les DDL contraints.
+    """
+    mat[0, :] = 0.0
+    mat[-1, :] = 0.0
+    mat[:, 0] = 0.0
+    mat[:, -1] = 0.0
 
 def rayleigh_damping(
     M: np.ndarray,
@@ -135,12 +210,82 @@ def rayleigh_damping(
     zeta_p, zeta_q = zetas_ref
     omega_p, omega_q = float(omegas[p]), float(omegas[q])
 
-    denom = (omega_p**2 - omega_q**2)
-    if abs(denom) < 1e-16:
-        raise ValueError("Fréquences de référence très proches: impossible de déterminer α et β de façon stable")
-    beta = 2.0 * (zeta_p * omega_p - zeta_q * omega_q) / denom
-    alpha = 2.0 * zeta_p * omega_p - beta * (omega_p**2)
+    # Solve Rayleigh parameters from the 2x2 linear system derived from
+    #   2 ζ(ω) = α/ω + β ω  evaluated at ω_p and ω_q
+    # System form:
+    #   [ 1/ω_p   ω_p ] [α] = [ 2 ζ_p ]
+    #   [ 1/ω_q   ω_q ] [β]   [ 2 ζ_q ]
+    A_sys = np.array([[1.0/omega_p, omega_p], [1.0/omega_q, omega_q]], dtype=float)
+    b_sys = np.array([2.0*zeta_p, 2.0*zeta_q], dtype=float)
+    try:
+        alpha_lin, beta_lin = np.linalg.solve(A_sys, b_sys)
+    except np.linalg.LinAlgError:
+        # Fallback to closed form (equivalent but numerically different path)
+        denom = (omega_p**2 - omega_q**2)
+        if abs(denom) < 1e-16:
+            raise ValueError("Fréquences de référence très proches: impossible de déterminer α et β de façon stable")
+        beta_lin = 2.0 * (zeta_p * omega_p - zeta_q * omega_q) / denom
+        alpha_lin = 2.0 * zeta_p * omega_p - beta_lin * (omega_p**2)
+
+    # Keep names alpha, beta for downstream
+    alpha = float(alpha_lin)
+    beta = float(beta_lin)
     C = alpha * M + beta * K
+    # Debug prints with levels
+    if _DEBUG_RAYLEIGH:
+        try:
+            two_pi = 2.0 * np.pi
+            f_hz = omegas / two_pi
+            p, q = modes_ref
+            zp, zq = zetas_ref
+            # Back-substitution check
+            zeta_p_chk = 0.5 * (alpha/omega_p + beta*omega_p)
+            zeta_q_chk = 0.5 * (alpha/omega_q + beta*omega_q)
+
+            lvl = int(_DEBUG_RAYLEIGH_LEVEL)
+            if lvl <= 1:
+                # Concise 1-2 line summary
+                print(
+                    f"[RAYLEIGH] p={p}, q={q} | f_p={f_hz[p]:.2f} Hz, f_q={f_hz[q]:.2f} Hz | "
+                    f"alpha={alpha:.3e} [1/s], beta={beta:.3e} [s]"
+                )
+                print(
+                    f"[RAYLEIGH] ζp tgt/ok Δ: {zp:.4f}/{zeta_p_chk:.4f} Δ={abs(zeta_p_chk-zp):.1e} | "
+                    f"ζq tgt/ok Δ: {zq:.4f}/{zeta_q_chk:.4f} Δ={abs(zeta_q_chk-zq):.1e}"
+                )
+            if lvl >= 2:
+                print("[DEBUG] Modelo: ζ(ω) = 0.5 (α/ω + β ω)")
+                print(f"[DEBUG] modes_ref=(p={p}, q={q}), ζ_targets=({zp:.5f}, {zq:.5f})")
+                print(f"[DEBUG] ω_p={omegas[p]:.6e} rad/s, ω_q={omegas[q]:.6e} rad/s | f_p={f_hz[p]:.3f} Hz, f_q={f_hz[q]:.3f} Hz")
+                lhs_p = f"2 ζ_p = α/ω_p + β ω_p  ->  2*{zp:.6f} = α/{omega_p:.6e} + β*{omega_p:.6e}"
+                lhs_q = f"2 ζ_q = α/ω_q + β ω_q  ->  2*{zq:.6f} = α/{omega_q:.6e} + β*{omega_q:.6e}"
+                print(f"[DEBUG] Eq(p): {lhs_p}")
+                print(f"[DEBUG] Eq(q): {lhs_q}")
+                with np.printoptions(precision=6, suppress=False):
+                    print("[DEBUG] Sistema linear A·[α β]^T = b:")
+                    print(A_sys)
+                    print(b_sys)
+                print(f"[DEBUG] Solução -> α = {alpha:.6e} [1/s], β = {beta:.6e} [s]")
+                print(f"[DEBUG] Checagem ζ_p: alvo={zp:.6f} | obtido={zeta_p_chk:.6f} | Δ={abs(zeta_p_chk - zp):.2e}")
+                print(f"[DEBUG] Checagem ζ_q: alvo={zq:.6f} | obtido={zeta_q_chk:.6f} | Δ={abs(zeta_q_chk - zq):.2e}")
+            if lvl >= 3:
+                _matrix_stats("M", M)
+                _matrix_stats("K", K)
+                _matrix_stats("C=αM+βK", C)
+                try:
+                    nC = float(np.linalg.norm(C, 'fro'))
+                    nAM = float(np.linalg.norm(alpha * M, 'fro'))
+                    nBK = float(np.linalg.norm(beta * K, 'fro'))
+                    sAM = (nAM / nC * 100.0) if nC > 0 else 0.0
+                    sBK = (nBK / nC * 100.0) if nC > 0 else 0.0
+                    print(f"[DEBUG] ||αM||_F={nAM:.3e} ({sAM:.1f}% de ||C||), ||βK||_F={nBK:.3e} ({sBK:.1f}% de ||C||)")
+                except Exception:
+                    pass
+            if lvl >= 4:
+                _print_blocks("C", C, k=4)
+        except Exception as _e_dbg:
+            print("[DEBUG] Rayleigh print error:", _e_dbg)
+    #C = alpha * M * 0 + beta * K * 0                               # Pour désactiver l'amortissement global (test)
     return float(alpha), float(beta), C, omegas
 
 
@@ -202,6 +347,11 @@ def assemble_system_matrices_nonuniform(
         _, _, C, _ = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
     else:
         C = np.zeros_like(M)
+    if apply_fixed_bc:
+        _apply_fixed_bc_inplace_damping(C)
+        if _DEBUG_RAYLEIGH and _DEBUG_RAYLEIGH_LEVEL >= 2:
+            print("[DEBUG] Applied damping BC to C (zeroed edge rows/cols)")
+            _print_bc_edges("C after BC", C)
     return M, K, C
 
 
@@ -251,86 +401,151 @@ def assemble_system_matrices(
         _, _, C, _ = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
     else:
         C = np.zeros_like(M)
+    if apply_fixed_bc:
+        _apply_fixed_bc_inplace_damping(C)
+        if _DEBUG_RAYLEIGH and _DEBUG_RAYLEIGH_LEVEL >= 2:
+            print("[DEBUG] Applied damping BC to C (zeroed edge rows/cols)")
+            _print_bc_edges("C after BC", C)
     return M, K, C
 
+# ---------------------------------------------------------------------------
+#             Assemble uniquement la matrice de masse globale
+# ---------------------------------------------------------------------------
+def assemble_mass(
+    *,
+    lin_density: float,                                     # Densité linéique μ (kg/m)
+    dx_vector: Sequence[float] | None = None,               # Longueurs élémentaires (mode non uniforme)
+    n_nodes: int | None = None,                             # Nombre de nœuds (mode uniforme) 
+    length: float | None = None,                            # Longueur totale (mode uniforme)
+    apply_fixed_bc: bool = False,                           # Applique CL fixes si True
+) -> np.ndarray:
+    """Assemble uniquement la matrice de masse globale M.
 
-def _apply_fixed_bc_inplace(mat: np.ndarray) -> None:
-    """
-    Applique des conditions aux limites fixes (Dirichlet) sur place.
+    Deux modes:
+      - Non uniforme : fournir dx_vector (longueurs élémentaires en m).
+      - Uniforme     : fournir n_nodes et length.
 
-    Stratégie :
-      - Annule les lignes/colonnes des nœuds extrêmes.
-      - Met la diagonale à 1 sur ces nœuds pour rendre la matrice inversible
-        (utile pour solveurs linéaires simples / élimination).
-    """
-    mat[0, :] = 0.0
-    mat[-1, :] = 0.0
-    mat[:, 0] = 0.0
-    mat[:, -1] = 0.0
-    mat[0, 0] = 1.0
-    mat[-1, -1] = 1.0
+    Formule locale (élément de longueur dx):
+        M_e = (μ * dx / 6) [[2, 1], [1, 2]]
 
-
-def assemble_mkc(
-    tension: float,
-    lin_density: float,
-    n_nodes: int | None = None,
-    length: float | None = None,
-    dx_vector: Sequence[float] | None = None,
-    apply_fixed_bc: bool = False,
-    return_meta: bool = False,
-    damping_modes_ref: tuple[int, int] | None = None,
-    damping_zetas_ref: tuple[float, float] | None = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
-    """
-        Assemble M,K,C uniquement en mode NON UNIFORME (dx_vector requis).
-
-        Utilisation :
-            - Non uniforme : fournir dx_vector (liste/array). Les paramètres n_nodes/length
-                sont ignorés et ne doivent pas être utilisés ici.
-
+    Paramètres
+    ----------
+    lin_density : float
+        Densité linéique μ (kg/m).
+    dx_vector : sequence[float] | None
+        Longueurs élémentaires (mode non uniforme).
+    n_nodes : int | None
+        Nombre de nœuds (mode uniforme).
+    length : float | None
+        Longueur totale (mode uniforme).
+    apply_fixed_bc : bool
+        Si True applique CL fixes (nœuds extrêmes bloqués) sur M.
+    
     Retour
     ------
-    (M,K,C) ou (M,K,C, meta) si return_meta=True.
-    meta contient : {'mode': 'uniform'|'nonuniform', 'n_nodes', 'n_elems', 'dx_min', 'dx_max', 'length_recon'}.
+    M : np.ndarray
+        Matrice de masse globale (n_nodes x n_nodes).
     """
-    if dx_vector is None:
-        raise ValueError("assemble_mkc: dx_vector est requis (mode non uniforme uniquement)")
+    if dx_vector is not None:
+        dx_arr = np.asarray(dx_vector, dtype=float)
+        if dx_arr.ndim != 1 or dx_arr.size == 0 or np.any(dx_arr <= 0):
+            raise ValueError("dx_vector invalide pour assemble_mass")
+        n_elems = dx_arr.size
+        n_nodes_eff = n_elems + 1
+        M = np.zeros((n_nodes_eff, n_nodes_eff), dtype=float)
+        for i, dx in enumerate(dx_arr):
+            mass_pref = lin_density * dx / 6.0
+            M_local = mass_pref * np.array([[2.0, 1.0], [1.0, 2.0]])
+            sl = slice(i, i + 2)
+            M[sl, sl] += M_local
+    else:
+        if n_nodes is None or length is None:
+            raise ValueError("Fournir n_nodes et length pour le mode uniforme dans assemble_mass")
+        if n_nodes < 2:
+            raise ValueError("n_nodes doit être >= 2")
+        if length <= 0 or lin_density <= 0:
+            raise ValueError("length et lin_density doivent être positifs")
+        n_elems = n_nodes - 1
+        dx = length / n_elems
+        M = np.zeros((n_nodes, n_nodes), dtype=float)
+        mass_pref = lin_density * dx / 6.0
+        M_local = mass_pref * np.array([[2.0, 1.0], [1.0, 2.0]])
+        for i in range(n_elems):
+            sl = slice(i, i + 2)
+            M[sl, sl] += M_local
 
-    # Mode non uniforme
-    M, K, C = assemble_system_matrices_nonuniform(
-        dx_vector=dx_vector,
-        tension=tension,
-        lin_density=lin_density,
-        damping_modes_ref=damping_modes_ref,
-        damping_zetas_ref=damping_zetas_ref,
-        apply_fixed_bc=apply_fixed_bc,
-    )
-    dx_arr = np.asarray(dx_vector, dtype=float)
-    meta = {
-        'mode': 'nonuniform',
-        'n_nodes': dx_arr.size + 1,
-        'n_elems': dx_arr.size,
-        'dx_min': float(dx_arr.min()),
-        'dx_max': float(dx_arr.max()),
-        'length_recon': float(dx_arr.sum()),
-        'mass_total': float(lin_density * dx_arr.sum())
-    }
-
-    if return_meta:
-        # Ajouter α, β et fréquences si paramètres fournis
-        if damping_modes_ref is not None and damping_zetas_ref is not None:
-            try:
-                alpha, beta, _, omegas = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
-                meta.update({'alpha': alpha, 'beta': beta, 'omegas': omegas})
-            except Exception:
-                pass
-        return M, K, C, meta
-    return M, K, C
+    if apply_fixed_bc:
+        _apply_fixed_bc_inplace(M)
+    return M
 
 
 # ---------------------------------------------------------------------------
-#              Utilitaires d'inspection des matrices locales
+# Assemblage dédié uniquement à la matrice de raideur K
+# ---------------------------------------------------------------------------
+def assemble_stiffness(
+    *,
+    tension: float,
+    dx_vector: Sequence[float] | None = None,
+    n_nodes: int | None = None,
+    length: float | None = None,
+    apply_fixed_bc: bool = False,
+) -> np.ndarray:
+    """Assemble seulement la matrice de raideur globale K.
+
+    Deux modes (comme assemble_mkc) :
+      - Non uniforme : fournir dx_vector (longueurs élémentaires en m).
+      - Uniforme     : fournir n_nodes et length.
+
+    Paramètres
+    ----------
+    tension : float
+        Tension T (N).
+    dx_vector : sequence[float] | None
+        Longueurs élémentaires (mode non uniforme).
+    n_nodes : int | None
+        Nombre de nœuds (mode uniforme) si dx_vector est None.
+    length : float | None
+        Longueur totale (mode uniforme).
+    apply_fixed_bc : bool
+        Si True, applique des CL fixes (nœuds extrêmes bloqués) en modifiant K.
+
+    Retour
+    ------
+    K : np.ndarray
+        Matrice de raideur globale (n_nodes x n_nodes).
+    """
+    if dx_vector is not None:
+        dx_arr = np.asarray(dx_vector, dtype=float)
+        if dx_arr.ndim != 1 or dx_arr.size == 0 or np.any(dx_arr <= 0):
+            raise ValueError("dx_vector invalide pour assemble_stiffness")
+        n_elems = dx_arr.size
+        n_nodes_eff = n_elems + 1
+        K = np.zeros((n_nodes_eff, n_nodes_eff), dtype=float)
+        for i, dx in enumerate(dx_arr):
+            K_local = (tension / dx) * np.array([[1.0, -1.0], [-1.0, 1.0]])
+            sl = slice(i, i + 2)
+            K[sl, sl] += K_local
+    else:
+        if n_nodes is None or length is None:
+            raise ValueError("Fournir n_nodes et length pour le mode uniforme dans assemble_stiffness")
+        if n_nodes < 2:
+            raise ValueError("n_nodes doit être >= 2")
+        if length <= 0 or tension <= 0:
+            raise ValueError("length et tension doivent être positifs")
+        n_elems = n_nodes - 1
+        dx = length / n_elems
+        K = np.zeros((n_nodes, n_nodes), dtype=float)
+        K_local = (tension / dx) * np.array([[1.0, -1.0], [-1.0, 1.0]])
+        for i in range(n_elems):
+            sl = slice(i, i + 2)
+            K[sl, sl] += K_local
+
+    if apply_fixed_bc:
+        _apply_fixed_bc_inplace(K)
+    return K
+
+# ---------------------------------------------------------------------------
+#              Utilitaires d'inspection des matrices locales (DEBUG)
 # ---------------------------------------------------------------------------
 # [AVERTISSEMENT] Fonction d'inspection/débogage uniquement — ne pas utiliser en production
 def compute_local_element_matrices(
@@ -398,7 +613,7 @@ def compute_local_element_matrices(
     return entries
 
 
-# [AVERTISSEMENT] Fonction d'inspection/débogage uniquement — ne pas utiliser en production
+    # [AVERTISSEMENT] Fonction d'inspection/débogage uniquement — ne pas utiliser en production
 def print_local_element_matrices(
     tension: float,
     lin_density: float,
@@ -450,6 +665,67 @@ def print_local_element_matrices(
         print("K_local =\n", K_loc)
     if limit is not None and total > limit:
         print(f"\n... ({total - limit} éléments supplémentaires non affichés) ...")
+
+
+def assemble_mkc(
+    tension: float,
+    lin_density: float,
+    n_nodes: int | None = None,
+    length: float | None = None,
+    dx_vector: Sequence[float] | None = None,
+    apply_fixed_bc: bool = False,
+    return_meta: bool = False,
+    damping_modes_ref: tuple[int, int] | None = None,
+    damping_zetas_ref: tuple[float, float] | None = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    """
+        Assemble M,K,C uniquement en mode NON UNIFORME (dx_vector requis).
+
+        Utilisation :
+            - Non uniforme : fournir dx_vector (liste/array). Les paramètres n_nodes/length
+                sont ignorés et ne doivent pas être utilisés ici.
+
+    Retour
+    ------
+    (M,K,C) ou (M,K,C, meta) si return_meta=True.
+    meta contient : {'mode': 'uniform'|'nonuniform', 'n_nodes', 'n_elems', 'dx_min', 'dx_max', 'length_recon'}.
+    """
+    if dx_vector is None:
+        raise ValueError("assemble_mkc: dx_vector est requis (mode non uniforme uniquement)")
+
+    # Mode non uniforme
+    M, K, C = assemble_system_matrices_nonuniform(
+        dx_vector=dx_vector,
+        tension=tension,
+        lin_density=lin_density,
+        damping_modes_ref=damping_modes_ref,
+        damping_zetas_ref=damping_zetas_ref,
+        apply_fixed_bc=apply_fixed_bc,
+    )
+    dx_arr = np.asarray(dx_vector, dtype=float)
+    meta = {
+        'mode': 'nonuniform',
+        'n_nodes': dx_arr.size + 1,
+        'n_elems': dx_arr.size,
+        'dx_min': float(dx_arr.min()),
+        'dx_max': float(dx_arr.max()),
+        'length_recon': float(dx_arr.sum()),
+        'mass_total': float(lin_density * dx_arr.sum())
+    }
+
+    if return_meta:
+        # Ajouter α, β et fréquences si paramètres fournis
+        if damping_modes_ref is not None and damping_zetas_ref is not None:
+            try:
+                alpha, beta, _, omegas = rayleigh_damping(M, K, damping_modes_ref, damping_zetas_ref)
+                meta.update({'alpha': alpha, 'beta': beta, 'omegas': omegas})
+            except Exception:
+                pass
+        return M, K, C, meta
+    return M, K, C
+
+
+
 
 
 def build_global_mkc_from_config(apply_fixed_bc: bool = False, return_meta: bool = True):
@@ -755,41 +1031,114 @@ if __name__ == "__main__":  # Petit banc d'essai
             with _np.printoptions(precision=3, suppress=True):
                 print(f"\nC (échelle réduite x{scale_C:.0e}) =\n", C * scale_C, "\n")
 
+    # ---------------------------------------------------------------
+    #    Diagnostics Rayleigh: α, β, normes et amortissements modaux
+    # ---------------------------------------------------------------
+    try:
+        alpha = meta.get('alpha', None)
+        beta = meta.get('beta', None)
+        _omegas_meta = np.asarray(meta.get('omegas', []), dtype=float)
+        if alpha is not None and beta is not None:
+            print("\n[DIAGNOSTIC] Rayleigh (C = α M + β K):")
+            print(f"  Alpha = {alpha:.6e} [1/s] | Beta = {beta:.6e} [s]")
+
+            # Normes de Frobenius pour évaluer les ordres de grandeur
+            nM = float(np.linalg.norm(M, 'fro'))
+            nK = float(np.linalg.norm(K, 'fro'))
+            nC = float(np.linalg.norm(C, 'fro'))
+            nAM = float(np.linalg.norm(alpha * M, 'fro'))
+            nBK = float(np.linalg.norm(beta * K, 'fro'))
+            share_am = (nAM / nC * 100.0) if nC > 0 else 0.0
+            share_bk = (nBK / nC * 100.0) if nC > 0 else 0.0
+            print(f"  ||M||_F = {nM:.3e} | ||K||_F = {nK:.3e} | ||C||_F = {nC:.3e}")
+            print(f"  ||αM||_F = {nAM:.3e} ({share_am:.1f}% de ||C||) | ||βK||_F = {nBK:.3e} ({share_bk:.1f}% de ||C||)")
+
+            # Amortissements modaux réalisés: ζ_i = 1/2 (α/ω_i + β ω_i)
+            if _omegas_meta.size > 0:
+                zetas_real = 0.5 * (alpha / _omegas_meta + beta * _omegas_meta)
+                k_show = int(min(10, zetas_real.size))
+                with _np.printoptions(precision=4, suppress=True):
+                    print(f"  ζ(modaux) réalisés — premiers {k_show}:", zetas_real[:k_show])
+                # Mettre en évidence les modes de référence et l'écart
+                if isinstance(modes_ref, tuple) and len(modes_ref) == 2:
+                    p, q = modes_ref
+                    if 0 <= p < zetas_real.size and 0 <= q < zetas_real.size:
+                        zp, zq = zetas_real[p], zetas_real[q]
+                        try:
+                            zt_p, zt_q = zetas_ref
+                        except Exception:
+                            zt_p, zt_q = None, None
+                        msg_p = f"p={p}: ζ_real = {zp:.5f}"
+                        if zt_p is not None:
+                            msg_p += f" | ζ_cible = {zt_p:.5f} | Δ = {abs(zp - zt_p):.2e}"
+                        msg_q = f"q={q}: ζ_real = {zq:.5f}"
+                        if zt_q is not None:
+                            msg_q += f" | ζ_cible = {zt_q:.5f} | Δ = {abs(zq - zt_q):.2e}"
+                        print("  Cibles:")
+                        print("   ", msg_p)
+                        print("   ", msg_q)
+                        print("  (Des valeurs de C petites peuvent être NORMALES si les ζ réalisés correspondent aux cibles.)")
+    except Exception as _e_diag:
+        print("[WARN] Échec des diagnostics Rayleigh:", _e_diag)
+
     # Affiche maintenant les matrices locales (c'est possible de limiter en cas de grand nombre d'éléments)
-    # print_local_element_matrices(
-    #     tension=config.T,                                           # Paramètres globaux -> Tension                                        
-    #     lin_density=config.MU,                                      # Paramètres globaux -> Densité linéique    
-    #     rayleigh_alpha=0.0,                                         # Non utilisé ici (calcul α/β modal)
-    #     rayleigh_beta=0.0,                                          # Non utilisé ici (calcul α/β modal)
-    #     dx_vector=[d/1000.0 for d in dxs_mm] if dxs_mm else None,   # Mode non uniforme si dxs_mm existe et converti en m
-    #     n_nodes=None if dxs_mm else config.N_NODES,                 # Le nombre de nœuds n'est utile que pour le mode uniforme
-    #     length=None if dxs_mm else config.L,                        # La longueur totale n'est utile que pour le mode uniforme   
-    #     limit=None,                                                 # Se juste placer ici le limite que vous voulez
-    # )
+    #print_local_element_matrices(
+    #    tension=config.T,                                           # Paramètres globaux -> Tension                                        
+    #    lin_density=config.MU,                                      # Paramètres globaux -> Densité linéique    
+    #    rayleigh_alpha=0.0,                                         # Non utilisé ici (calcul α/β modal)
+    #    rayleigh_beta=0.0,                                          # Non utilisé ici (calcul α/β modal)
+    #    dx_vector=[d/1000.0 for d in dxs_mm] if dxs_mm else None,   # Mode non uniforme si dxs_mm existe et converti en m
+    #    n_nodes=None if dxs_mm else config.N_NODES,                 # Le nombre de nœuds n'est utile que pour le mode uniforme
+    #    length=None if dxs_mm else config.L,                        # La longueur totale n'est utile que pour le mode uniforme   
+    #    limit=None,                                                 # Se juste placer ici le limite que vous voulez
+    #)
 
     # ---------------------------------------------------------------
     #            Fréquences propres: affichage de contrôle
     # ---------------------------------------------------------------
     try:
-        # Utiliser d'abord celles calculées pendant le calcul d'α,β si disponibles dans meta
+        # 1) Source préférée des pulsations propres ω (rad/s):
+        #    Si le calcul de Rayleigh (α, β) a déjà été effectué, la fonction
+        #    rayleigh_damping(...) a résolu le problème aux valeurs propres
+        #    généralisé K x = ω² M x (sur les DDL libres) et a stocké les ω
+        #    dans meta['omegas'].
         _omegas = np.asarray(meta.get('omegas', []), dtype=float)
+
+        # 2) Fallback si meta ne contient pas les ω:
+        #    On recalcule rapidement à partir de M et K en formant la matrice
+        #    A = M^{-1} K, puis en résolvant A v = λ v avec λ = ω².
+        #    Détails des appels numpy:
+        #      - np.linalg.solve(M, K): résout M · A = K pour A (évite l'inversion explicite de M).
+        #      - np.linalg.eig(A): renvoie (valeurs propres λ, vecteurs propres).
+        #      - np.real(...): on projette sur la partie réelle (petits imaginaires numériques -> 0).
+        #      - np.sqrt(λ): donne ω = √λ (rad/s).
         if _omegas.size == 0:
-            # Sinon, recalculer rapidement à partir de M et K
-            # np.linalg.solve évite l'inversion explicite de M
-            # A = M^-1 K
-            A = np.linalg.solve(M, K)
-            eigvals, _ = np.linalg.eig(A)
-            eigvals = np.real(eigvals)
-            eigvals[eigvals < 0] = 0.0
-            _omegas = np.sqrt(eigvals)
-            _omegas.sort()
+            # NOTE sur CL (Dirichlet via diag=1 et lignes/colonnes nulles):
+            # Si M et K contiennent déjà ces CL, A inclura des modes triviaux
+            # contraints. C'est acceptable ici car ce bloc est purement
+            # diagnostique et, en pratique, meta['omegas'] est préféré.
+            A = np.linalg.solve(M, K)         # A ≡ M^{-1} K (sans inversion explicite)
+            eigvals, _ = np.linalg.eig(A)     # valeurs propres λ ≈ ω²
+            eigvals = np.real(eigvals)        # on ignore de minuscules parties imaginaires
+            eigvals[eigvals < 0] = 0.0        # coupe les petites négativités dues aux erreurs d'arrondi
+            _omegas = np.sqrt(eigvals)        # ω = √λ (rad/s)
+            _omegas.sort()                    # tri croissant des pulsations
+
+        # 3) Conversion en fréquences f (Hz): f = ω / (2π)
         f_hz = _omegas / (2 * np.pi)
+
+        # 4) Impression formatée: np.printoptions crée un contexte temporaire
+        #    de formatage (ici: 3 décimales, suppression des notations
+        #    scientifiques pour les petites valeurs si approprié).
         with _np.printoptions(precision=3, suppress=True):
             print("\nFréquences (Hz) — premières 10 =", f_hz[:10])
-        # Afficher aussi les modes de référence si définis
+
+        # 5) Rappel des modes de référence (si définis): on affiche les
+        #    fréquences associées aux indices (p, q) et les ζ demandés.
         if isinstance(modes_ref, tuple) and len(modes_ref) == 2:
             p, q = modes_ref
             if 0 <= p < f_hz.size and 0 <= q < f_hz.size:
                 print(f"Modes réf. (p={p}, q={q}) → f_p = {f_hz[p]:.3f} Hz | f_q = {f_hz[q]:.3f} Hz | ζ = {zetas_ref}")
     except Exception as e:
+        # C'est juste un diagnostic, on ne veut pas planter le script
         print("[WARN] Échec lors de l'impression des fréquences:", e)
