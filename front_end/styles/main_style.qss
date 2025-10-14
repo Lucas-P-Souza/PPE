@@ -1,109 +1,156 @@
-/* style pour la fenêtre principale (dark slate, un peu plus clair) */
+/* style pour la fenêtre principale (dark slate modern, légèrement plus clair) */
 #MainWindow {
-    background-color: #192332; /* ardoise sombre mais pas trop */
+    /* Palette A: base #1B2433 avec gradient subtil optionnel */
+    background-color: #1B2433;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #1B2433, stop:1 #202C3E);
+}
+
+/* Top bar container with subtle separation */
+#TopBar {
+    /* leve elevação: gradiente sutil de cima para baixo */
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #1B2433, stop:1 #202C3E);
+    border-bottom: 1px solid #2A3548; /* separador discreto */
 }
 
 /* style pour le titre principal */
 #TitleLabel {
     font-size: 40px;
-    font-weight: bold;
-    color: #e5e7eb; /* gris-100 */
-    margin: 10px 0 12px 0;
+    font-weight: 600; /* un peu moins lourd pour un look moderne */
+    color: #E6EAF0;
+    margin: 8px 0 14px 0;
 }
 
 /* style pour le texte d'informations */
 #InfoLabel {
+    /* textes secondaires plus doux */
     font-size: 16px;
-    color: #d1d5db; /* gris clair pour meilleure lisibilité */
+    color: #C9D0DA;
     font-style: italic;
     margin: 12px;
 }
 
 /* conteneur visuel pour la corde (carte sombre) */
 #StringContainer {
-    background-color: #111a29; /* léger contraste avec la fenêtre principale */
-    border: 1px solid #3b4a5f; /* bord plus doux */
-    border-radius: 16px;
+    /* Palette A: carte plus claire avec gradient subtil */
+    background-color: #141C2A;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #141C2A, stop:1 #162132);
+    border: 1px solid #3E4A5E;
+    border-radius: 14px;
 }
 
 /* étiquette de statut */
 #StatusLabel {
     font-size: 18px;
-    color: #38bdf8; /* sky-400 : accent moderne, moins néon */
+    color: #C9D0DA;
     font-weight: 600;
-    margin: 8px;
+    margin: 8px 12px 12px 12px; /* un peu plus bas */
+    /* lisibilité des valeurs numériques */
+    font-family: "Consolas", "JetBrains Mono", monospace;
 }
 
 /* couleurs du CordeWidget contrôlées via qproperty */
 CordeWidget {
-    qproperty-stringColor:    #e5e7eb; /* gris clair : corde */
-    qproperty-fretColor:      #717784; /* gris moyen : frettes */
-    qproperty-nutColor:       #ffffff; /* sillet : léger accent */
-    qproperty-fretTextColor:  #d1d5db; /* numéros plus lisibles */
-    qproperty-cursorColor:    #38bdf8; /* accent principal : curseur */
-    qproperty-strikeCursorColor: #f59e0b; /* accent secondaire : attaque */
+    /* Palette A appliquée */
+    qproperty-stringColor:       #E9EDF2;  /* corde */
+    qproperty-fretColor:         #8B94A6;  /* frettes */
+    qproperty-nutColor:          #DDE2EB;  /* sillet */
+    qproperty-fretTextColor:     #B8C0CC;  /* numéros discrets */
+    qproperty-cursorColor:       #7DD3FC;  /* curseur principal */
+    qproperty-strikeCursorColor: #F4B96B;  /* curseur d'attaque */
+    qproperty-bridgeColor:       #9AA3B2;  /* rastilho */
 }
 
 /* bouton des paramètres (coin supérieur droit) */
 #SettingsButton {
     font-size: 22px;
-    font-weight: 700;
-    color: #d1d5db;
-    background-color: #131c2b;
-    border: 1px solid #3b4a5f;
-    border-radius: 12px;
+    font-weight: 600;
+    color: #C9D0DA;
+    background-color: #131C2B;
+    border: 1px solid #3E4A5E;
+    border-radius: 14px;
     padding: 6px 10px;
 }
 #SettingsButton:hover {
     background-color: #172235;
-    border-color: #4a5c77;
-    color: #e5e7eb;
+    border-color: #4D5A73;
+    color: #E6EAF0;
 }
 #SettingsButton:pressed {
     background-color: #101827;
 }
 
-/* dialogue style carte : fond arrondi dans le conteneur translucide */
+/* dialogue style carte : fond arrondi et opaque */
 #SettingsCard {
-    /* le conteneur du dialogue est translucide ; on stylise le contenu via un QWidget interne */
+    /* donner au fond du QDialog la même base sombre pour éviter bordas claras */
+    background-color: #1B2433;
+    border: none;
 }
 QDialog#SettingsCard > QWidget {
-    background-color: #131c2b; /* fond du card légèrement plus clair */
-    border: 1px solid #3b4a5f;
+    background-color: #141C2A; /* card */
+    border: 1px solid #3E4A5E;
+    border-radius: 16px;
+}
+/* corps explicite du card: légèrement plus clair pour mieux se détacher */
+#SettingsCardBody {
+    background-color: #1E2A3C; /* opaque, un peu plus clair que #141C2A */
+    border: 1px solid #4D5A73;
     border-radius: 16px;
 }
 QDialog#SettingsCard QLabel {
-    color: #e5e7eb;
+    color: #E6EAF0;
     font-size: 16px;
 }
 QDialog#SettingsCard QPushButton {
     background-color: #162236;
-    color: #d1d5db;
-    border: 1px solid #3b4a5f;
+    color: #C9D0DA;
+    border: 1px solid #3E4A5E;
     border-radius: 10px;
     padding: 6px 12px;
 }
 QDialog#SettingsCard QPushButton:hover {
-    background-color: #1a2a42;
-    color: #e5e7eb;
+    /* mettre en avant par bordure seulement, pas par fond lumineux */
+    background-color: #162236;
+    border: 1px solid #7DD3FC;
+    color: #E6EAF0;
 }
 QDialog#SettingsCard QPushButton:pressed {
-    background-color: #0f1828;
+    background-color: #0F1828;
+}
+
+/* header do diálogo (área de arraste) */
+#DialogHeader {
+    background-color: transparent;
+}
+#DialogCloseButton {
+    background-color: #1F2B3E;
+    color: #E6EAF0;
+    border: 1px solid #3E4A5E;
+    border-radius: 6px;
+}
+#DialogCloseButton:hover {
+    background-color: #233146;
+    border-color: #7DD3FC;
+}
+#DialogCloseButton:pressed {
+    background-color: #192538;
 }
 
 /* onglets modernes pour le dialogue */
 QDialog#SettingsCard QTabBar::tab {
     background: transparent;
-    color: #cbd5e1;
-    padding: 8px 14px;
+    color: #C9D0DA;
+    padding: 10px 16px; /* un peu plus d'air */
     margin-right: 6px;
 }
 QDialog#SettingsCard QTabBar::tab:hover {
-    color: #e5e7eb;
+    color: #E6EAF0;
 }
 QDialog#SettingsCard QTabBar::tab:selected {
-    color: #e5e7eb;
-    border-bottom: 2px solid #38bdf8; /* accent sous l'onglet actif */
+    color: #E6EAF0;
+    border-bottom: 2px solid #7DD3FC; /* accent sous l'onglet actif */
 }
 QDialog#SettingsCard QTabWidget::pane {
     border: none;
@@ -117,11 +164,11 @@ QDialog#SettingsCard QSlider::groove:horizontal {
     border-radius: 3px;
 }
 QDialog#SettingsCard QSlider::sub-page:horizontal {
-    background: #38bdf8;
+    background: #7DD3FC;
     border-radius: 3px;
 }
 QDialog#SettingsCard QSlider::handle:horizontal {
-    background: #38bdf8;
+    background: #7DD3FC;
     width: 16px;
     height: 16px;
     margin: -6px 0; /* centrer le handle sur la gorge */
@@ -129,5 +176,14 @@ QDialog#SettingsCard QSlider::handle:horizontal {
     border: 2px solid #ffffff22;
 }
 QDialog#SettingsCard QSlider::handle:horizontal:hover {
-    background: #5cc9fb;
+    background: #9ADDFD;
+}
+
+/* info-bulle lisible et harmonisée */
+QToolTip {
+    background-color: #0F172A;
+    color: #E2E8F0;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 6px 8px;
 }

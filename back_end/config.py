@@ -216,10 +216,10 @@ def courant_number() -> float:
 # =============================================================
 # 4. CONDITIONS INITIALES (PINÇAGE)
 # -------------------------------------------------------------
-# - Utilisé par: solver.inicializar_estados_iniciais / inicializar_u0_triangulo
+# - Utilisé par: solver.initialiser_etats_initiaux / initialiser_u0_triangle
 # PLUCK_POS : Fraction de la longueur où la corde est pincée (0 < x < 1)
 # PLUCK_AMP : Amplitude initiale (m)
-PLUCK_POS: float = 0.1    # 10% de L
+PLUCK_POS: float = 0.7    # 50% de L
 PLUCK_AMP: float = 0.003  # 3 mm
 
 # =============================================================
@@ -269,11 +269,25 @@ DEBUG_ENABLED: bool = True
 # (le module debug le considère si DEBUG_ENABLED n'est pas défini)
 DEBUG_RAYLEIGH: bool = DEBUG_ENABLED
 
+# Interrupteurs pour activer/désactiver les sorties de fichiers (pour débogage terminal uniquement)
+# - OUTPUT_ENABLE_IMAGES : contrôle tous les PNG (modes, x(t), énergies, FFT, snapshots, frame t0)
+# - OUTPUT_ENABLE_GIFS   : contrôle l'animation GIF
+# - OUTPUT_ENABLE_CSV    : contrôle l'export CSV des déplacements
+# AVERTISSEMENT: Ces interrupteurs n'affectent pas le calcul (Newmark, M/K/C), uniquement les E/S.
+OUTPUT_ENABLE_IMAGES: bool = True
+OUTPUT_ENABLE_GIFS: bool = True
+OUTPUT_ENABLE_CSV: bool = True
+
 # =============================================================
 # 5.1. PARAMÈTRES DE FFT (consommés par solver)
 # -------------------------------------------------------------
 # AVERTISSEMENT (FFT): Tous les paramètres de cette section influencent uniquement l'analyse/les graphiques
 # et ne modifient pas l'intégration temporelle ni les matrices M/K/C.
+# Style préféré pour le tracé FFT dans le backend/main
+#   'linear'  → tracer_fft_png (amplitude lin. + panneau dB)
+#   'logdb'   → tracer_fft_logdb_remplie (axe fréquence log, amplitude dB remplie)
+FFT_STYLE: str = "logdb"
+
 # Contrôles généraux (FFT linéaire et dB)
 FFT_WINDOW: str = "hann"           # fenêtre: hann, hamming, blackman, flattop, etc.
 FFT_ZERO_PAD_FACTOR: float = 1.0    # >=1.0; zero-padding pour raffiner l'échantillonnage en fréquence
@@ -290,6 +304,14 @@ FFT_LOG_BINS_PER_OCTAVE: int | None = None  # rééchantillonnage log (bins/octa
 FFT_LOG_OCTAVE_SMOOTH: float = 0.0  # lissage fraction d'octave (en octaves)
 FFT_LOG_SMOOTH_DOMAIN: str = "db"   # "db" (par défaut) ou "linear"
 
+# Optionnel: spectrogramme (temps-fréquence) — utile pour visualiser l'évolution spectrale
+ENABLE_SPECTROGRAM: bool = False
+SPECTROGRAM_FMIN: float = 0.0       # Hz
+SPECTROGRAM_FMAX: float | None = None
+SPECTROGRAM_NPERSEG: int | None = None   # None → auto (~1/20 de la durée)
+SPECTROGRAM_OVERLAP: float = 0.5         # fraction [0,1), ex.: 0.5 → 50% recouvrement
+SPECTROGRAM_CMAP: str = "magma"
+
 # =============================================================
 # 5.2. PARAMÈTRES D'ANIMATION ADDITIONNELS
 # -------------------------------------------------------------
@@ -299,6 +321,42 @@ ANIM_DECIM_SLOW: int = 5            # décimation pour le GIF au ralenti
 ANIM_FPS_SLOW: int = 33             # FPS du GIF au ralenti
 ANIM_FPS_REAL: int = 30             # FPS du GIF « temps réel »
 
+# Durée alvo (optionnelle) para o GIF slow, em segundos. Se definida (>0), o código
+# tentará ajustar a decimação temporal para que a duração do GIF seja ≈ ANIM_SLOW_DURATION_S.
+# Caso não definida, usa-se ANIM_SLOW_FACTOR (se existir) ou ANIM_DECIM_SLOW (fallback antigo).
+# Observação: a duração máxima atingível é (n_passos_totais / ANIM_FPS_SLOW).
+ANIM_SLOW_DURATION_S: float | None = 60.0
+
+
+# =============================================================
+# 5.3. FORCE D'EXCITATION LOCALISÉE (corde pincée au temps)
+# -------------------------------------------------------------
+# Ces paramètres contrôlent l'enveloppe trapézoïdale utilisée par
+# time_integration.fournisseur_force_localisee. Le nœud d'application est
+# choisi à partir de PLUCK_POS (fraction de L), en prenant le nœud le plus proche.
+# - EXCITATION_F_MAX  : amplitude maximale (Newtons)
+# - EXCITATION_T_RISE : montée (s)
+# - EXCITATION_T_HOLD : palier (s)
+# - EXCITATION_T_DECAY: décroissance (s)
+EXCITATION_F_MAX: float = 1.0
+EXCITATION_T_RISE: float = 0.01
+EXCITATION_T_HOLD: float = 0.03
+EXCITATION_T_DECAY: float = 0.005
+
+# Deuxième excitation optionnelle (re-pincement) — temps de début (s)
+# - Si <= 0, aucune deuxième excitation n'est ajoutée.
+EXCITATION_SECOND_T0: float = 1.5
+
+# Extension automatique de la simulation « jusqu'à arrêt » (décroissance)
+# - Si True, la simulation est exécutée par tranches (CHUNK_SECONDS) jusqu'à
+#   ce que le déplacement et la vitesse restent sous des seuils pendant une
+#   fenêtre STOP_WINDOW_SEC, ou que MAX_SIM_SECONDS soit atteint.
+AUTO_EXTEND_SIM: bool = False
+MAX_SIM_SECONDS: float = 3.0     # borne supérieure de sécurité
+CHUNK_SECONDS: float = 0.5       # taille des tranches d'intégration
+STOP_WINDOW_SEC: float = 0.2     # fenêtre d'observation de fin (secondes)
+STOP_THRESH_U: float = 1e-6      # seuil déplacement (m)
+STOP_THRESH_V: float = 1e-4      # seuil vitesse (m/s)
 
 # =============================================================
 # 6. FONCTIONS AUXILIAIRES (optionnel)

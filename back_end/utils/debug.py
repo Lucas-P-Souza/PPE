@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 _ENABLED: bool = False
+_PRINT_ONCE_FLAGS: dict[str, bool] = {}
 
 # Initialisation depuis le module config si disponible
 try:  # pragma: no cover - best-effort import
@@ -79,6 +80,100 @@ def dlazy(make_msg: Callable[[], Any], *, prefix: str = "[DEBUG] ") -> None:
     except Exception:
         # Ne pas laisser un échec de debug affecter le flot principal
         pass
+
+
+def _should_print_once(key: str) -> bool:
+    # Retourne True si l'impression associée à 'key' n'a pas encore été effectuée.
+    # Marque l'impression comme faite (idempotent côté appelant).
+    done = _PRINT_ONCE_FLAGS.get(key, False)
+    if not done:
+        _PRINT_ONCE_FLAGS[key] = True
+        return True
+    return False
+
+
+def print_rayleigh_explained(
+    alpha: float,
+    beta: float,
+    omegas: Any,
+    modes_ref: tuple[int, int],
+    zetas_ref: tuple[float, float],
+    *,
+    print_once: bool = True,
+) -> None:
+    # Bloc d'explication détaillé pour l'amortissement de Rayleigh (centré ici).
+    # Imprime une seule fois par défaut (print_once=True). Protégé par is_enabled().
+    if not is_enabled():
+        return
+    try:
+        import numpy as np
+        two_pi = 2.0 * np.pi
+        omegas = np.asarray(omegas, dtype=float)
+        f_hz = omegas / two_pi if omegas.size else np.array([])
+        p, q = modes_ref
+        zp, zq = zetas_ref
+        # Sécurité indices
+        if omegas.size == 0 or p < 0 or q < 0 or p >= omegas.size or q >= omegas.size or p == q:
+            # Indices invalides ou pas de modes — on affiche juste α/β
+            msg_basic = (
+                "\n[RAILEIGH] Paramètres (indices non valides ou omegas vides)\n"
+                f"  • Paramètres: α={alpha:.3e} [1/s], β={beta:.3e} [s]\n"
+            )
+            if print_once and not _should_print_once("rayleigh_explained"):
+                return
+            dlazy(lambda: msg_basic, prefix="")
+            return
+
+        omega_p = float(omegas[p])
+        omega_q = float(omegas[q])
+        # Amortissements atteints aux fréquences de référence
+        zeta_p_chk = 0.5 * (alpha/omega_p + beta*omega_p)
+        zeta_q_chk = 0.5 * (alpha/omega_q + beta*omega_q)
+        d_abs_p = abs(zeta_p_chk - zp)
+        d_abs_q = abs(zeta_q_chk - zq)
+        d_rel_p = (d_abs_p / zp * 100.0) if zp > 0 else float('nan')
+        d_rel_q = (d_abs_q / zq * 100.0) if zq > 0 else float('nan')
+        # Fréquence de croisement (où α/ω = β ω)
+        fx_txt = "n/a"
+        if alpha > 0.0 and beta > 0.0:
+            try:
+                omega_x = float(np.sqrt(alpha / beta))
+                fx_txt = f"{omega_x/two_pi:.2f} Hz"
+            except Exception:
+                fx_txt = "n/a"
+
+        def _fmt_samples(max_modes: int = 3) -> str:
+            k = min(max_modes, omegas.size)
+            if k <= 0:
+                return "(aucun mode libre détecté)"
+            vals: list[str] = []
+            for i in range(k):
+                wi = float(omegas[i])
+                zi = 0.5 * (alpha/wi + beta*wi)
+                vals.append(f"f{i+1}={f_hz[i]:.2f} Hz → ζ={zi:.4f}")
+            return ", ".join(vals)
+
+        def _make_msg() -> str:
+            return (
+                "\n"  # bloc multi-lignes explicatif
+                "[RAYLEIGH] Paramètres et vérifications (explications)\n"
+                "  • Loi: ζ(ω) = 1/2 (α/ω + β ω) — C = α M + β K\n"
+                f"  • Références: modes p={p}, q={q} | f_p={f_hz[p]:.2f} Hz, f_q={f_hz[q]:.2f} Hz\n"
+                f"  • Cibles: ζ_p={zp:.4f}, ζ_q={zq:.4f}\n"
+                f"  • Atteints: ζ_p={zeta_p_chk:.4f} (Δ={d_abs_p:.2e}, {d_rel_p:.2f}%) | "
+                f"ζ_q={zeta_q_chk:.4f} (Δ={d_abs_q:.2e}, {d_rel_q:.2f}%)\n"
+                f"  • Paramètres: α={alpha:.3e} [1/s], β={beta:.3e} [s]\n"
+                f"  • Fréquence de croisement (α/ω = βω): {fx_txt}\n"
+                f"  • Échantillon ζ aux premiers modes: {_fmt_samples()}\n"
+                "  • Note: α,β déterminés sur matrices évaluées (libres si CL fixées);\n"
+                "          puis C formée sur M/K avant CL; bord de C annulé (sans diag=1).\n"
+            )
+
+        if print_once and not _should_print_once("rayleigh_explained"):
+            return
+        dlazy(_make_msg, prefix="")
+    except Exception as _e_dbg:
+        dprint(f"[AVERTISSEMENT] Échec d'impression Rayleigh: {_e_dbg}")
 
 
 def section(title: str, char: str = "-", width: int = 60) -> None:
@@ -353,4 +448,99 @@ def print_formulation_diagnostics(
             dprint(f"[AVERTISSEMENT] Échec lors de l'impression des fréquences: {e}")
     except Exception:
         # guard against any printing failure
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Solver-specific debug helpers
+# ---------------------------------------------------------------------------
+def get_solver_sample_interval(n_steps: int) -> int:
+    # Retourne l'intervalle d'échantillonnage pour les impressions par pas.
+    # Essaie config.DEBUG_SOLVER_SAMPLE, sinon ~50 échantillons sur la durée.
+    try:
+        from .. import config as _cfg  # type: ignore
+        val = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLE", 0))
+        if val and val > 0:
+            return val
+    except Exception:
+        pass
+    return max(1, int(n_steps // 50) or 1)
+
+
+def print_solver_setup_summary(M, C, K, *, dt: float, t_max: float, n_steps: int, constrained_idxs: list[int] | Any) -> None:
+    # Résumé des tailles, DOF libres/contraints, pas de temps et normes.
+    if not is_enabled():
+        return
+    try:
+        import numpy as np
+        n = int(M.shape[0])
+        constrained = list(constrained_idxs) if constrained_idxs is not None else []
+        free_n = n - len(constrained)
+        dprint(f"[SOLVER] Setup: n={n} | free={free_n} | constrained={len(constrained)} | dt={dt:.6e}s | t_max={t_max:.6e}s | n_steps={n_steps}")
+        # Normes de Frobenius (information simple de magnitude)
+        try:
+            nM = float(np.linalg.norm(np.asarray(M), 'fro'))
+            nC = float(np.linalg.norm(np.asarray(C), 'fro'))
+            nK = float(np.linalg.norm(np.asarray(K), 'fro'))
+            dprint(f"[SOLVER] Normes: ||M||_F={nM:.3e} | ||C||_F={nC:.3e} | ||K||_F={nK:.3e}")
+        except Exception:
+            pass
+        # Aperçu des contraintes
+        if len(constrained) > 0:
+            show = constrained[:10]
+            suffix = "..." if len(constrained) > 10 else ""
+            dprint(f"[SOLVER] Constrained idx (first 10): {show}{suffix}")
+    except Exception:
+        pass
+
+
+def print_newmark_constants(*, dt: float, beta: float, gamma: float, a0: float, a1: float, a2: float, a3: float, a4: float, a5: float) -> None:
+    # Affiche les coefficients Newmark utilisés.
+    if not is_enabled():
+        return
+    try:
+        dprint("[SOLVER] Newmark (β, γ) et constantes:", prefix="")
+        dprint(f"  β={beta:.6g}, γ={gamma:.6g}, dt={dt:.6e}s", prefix="")
+        dprint(f"  a0={a0:.3e}, a1={a1:.3e}, a2={a2:.3e}, a3={a3:.3e}, a4={a4:.3e}, a5={a5:.3e}", prefix="")
+    except Exception:
+        pass
+
+
+def print_step_snapshot(k: int, t_k: float, U_col, V_col, A_col, *, M=None, K=None, compute_energy: bool = True) -> None:
+    # Imprime un résumé pour un pas de temps: max/min des états et énergies (optionnel).
+    if not is_enabled():
+        return
+    try:
+        import numpy as np
+        U_col = np.asarray(U_col, dtype=float).reshape(-1)
+        V_col = np.asarray(V_col, dtype=float).reshape(-1)
+        A_col = np.asarray(A_col, dtype=float).reshape(-1)
+        u_max = float(np.nanmax(np.abs(U_col)))
+        v_max = float(np.nanmax(np.abs(V_col)))
+        a_max = float(np.nanmax(np.abs(A_col)))
+        line = f"[STEP] k={k:6d} t={t_k:10.6e} | max|U|={u_max:.3e}, max|V|={v_max:.3e}, max|A|={a_max:.3e}"
+        if compute_energy and (M is not None) and (K is not None):
+            try:
+                Ek = 0.5 * float(V_col.T @ (np.asarray(M) @ V_col))
+                Ep = 0.5 * float(U_col.T @ (np.asarray(K) @ U_col))
+                Et = Ek + Ep
+                line += f" | Ek={Ek:.3e}, Ep={Ep:.3e}, Et={Et:.3e}"
+            except Exception:
+                pass
+        dprint(line)
+    except Exception:
+        pass
+
+
+def print_energy_start_end(*, t0: float, tn: float, Ek0: float, Ep0: float, Et0: float, Ekn: float, Epn: float, Etn: float) -> None:
+    # Résumé simple des énergies au début et à la fin (utile pour vérifier la décroissance avec amortissement).
+    if not is_enabled():
+        return
+    try:
+        drop = (Et0 - Etn) / Et0 * 100.0 if Et0 > 0 else float('nan')
+        dprint("[ENERGY] Début/Fin:", prefix="")
+        dprint(f"  t0={t0:.6e}: Ek0={Ek0:.3e}, Ep0={Ep0:.3e}, Et0={Et0:.3e}", prefix="")
+        dprint(f"  tn={tn:.6e}: Ekn={Ekn:.3e}, Epn={Epn:.3e}, Etn={Etn:.3e}", prefix="")
+        dprint(f"  ΔEtot = {Et0 - Etn:.3e} ({drop:.2f}%)", prefix="")
+    except Exception:
         pass

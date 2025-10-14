@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QWidget, QSizePolicy
+from PyQt5.QtWidgets import QWidget, QSizePolicy, QToolTip
 from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont
 from PyQt5.QtCore import Qt, QPointF, QSize, pyqtProperty, pyqtSignal
 
@@ -13,7 +13,7 @@ class CordeWidget(QWidget):
         
         # définit la politique de taille pour que le widget puisse s'étendre
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setMinimumHeight(150)
+        self.setMinimumHeight(300)
         self.setMinimumWidth(320)
 
         # état actuel de la note mise en évidence
@@ -30,8 +30,9 @@ class CordeWidget(QWidget):
         # ajustements fins par frette (fraction 0..1 à ajouter au modèle 12-TET), indices 0..12
         # 0 forcé à 0.0 ; autorise de petits ajustements (-0.02..0.02) pour 1..12
         self._fretAdjustFrac = [0.0] * 13
-        # fraction de fin visible de la corde (0.6..1.0), pour que la corde se termine "un peu après" la rosace
-        self._scaleRightFrac = 0.82
+        # fraction de fin visible de la corde (0.6..1.0). Pour refléter exactement la longueur, utiliser 1.0.
+        # Ajusté par défaut à 1.0 pour que la corde visible couvre 100% de la longueur normalisée.
+        self._scaleRightFrac = 1.0
         
         # couleurs configurables via QSS (qproperty-*)
         self._stringColor = QColor("#c0c0c0")
@@ -40,6 +41,55 @@ class CordeWidget(QWidget):
         self._fretTextColor = QColor("#aaaaaa")
         self._cursorColor = QColor("#5db3f0")
         self._strikeCursorColor = QColor("#f59e0b")  # couleur distincte pour le curseur d'attaque
+        # couleur du rastilho (bridge)
+        self._bridgeColor = QColor("#9AA3B2")
+        # exibir rótulo do rastilho ("R") — desativado por padrão
+        self._showBridgeLabel = False
+
+        # --- géométrie issue du back-end (config) ---
+        # Nous construisons la discrétisation normalisée [0..1] directement à partir de
+        # digital_twin.back_end.config.FRET_NODE_POSITIONS_MM (cumule) et FRET_DXS_MM.
+        # Si indisponible, nous retombons sur une échelle uniforme simple.
+        self._node_fracs = [0.0]
+        self._have_backend_geom = False
+        self._total_length_m = 1.0
+        try:
+            from digital_twin.back_end import config as _cfg  # type: ignore
+            nodes_mm = list(getattr(_cfg, 'FRET_NODE_POSITIONS_MM', [0.0]))
+            if nodes_mm and nodes_mm[-1] > 0:
+                total_m = float(nodes_mm[-1]) / 1000.0
+                # normalise en fractions 0..1 par rapport à la dernière position de nœud
+                self._node_fracs = [float(v) / 1000.0 / total_m for v in nodes_mm]
+                self._have_backend_geom = True
+                self._total_length_m = total_m
+        except Exception:
+            self._node_fracs = [i / 100.0 for i in range(101)]  # fallback uniforme 100 divisions
+            self._have_backend_geom = False
+            self._total_length_m = 1.0
+
+        # Politique de pas: aimanter les curseurs aux nœuds réels (discrétisation non uniforme)
+        self._snapToNodes = True
+        # activer le suivi de la souris pour mettre à jour l'infobulle dynamiquement
+        self.setMouseTracking(True)
+
+    def _build_tooltip_text(self) -> str:
+        """Construit un texte d'infobulle avec les informations des deux curseurs (note et attaque)."""
+        try:
+            node_note = self.nearest_node_index(self.cursor_pos)
+            elem_note = self.nearest_element_index(self.cursor_pos)
+            x_note = self.frac_to_meters(self.cursor_pos)
+        except Exception:
+            node_note, elem_note, x_note = 0, 0, 0.0
+        try:
+            node_strike = self.nearest_node_index(self.strike_cursor_pos)
+            elem_strike = self.nearest_element_index(self.strike_cursor_pos)
+            x_strike = self.frac_to_meters(self.strike_cursor_pos)
+        except Exception:
+            node_strike, elem_strike, x_strike = 0, 0, 0.0
+        return (
+            f"Note: Nœud {node_note}, Élément {elem_note}, x={x_note:.3f} m\n"
+            f"Pincer: Nœud {node_strike}, Élément {elem_strike}, x={x_strike:.3f} m"
+        )
 
     # --- api d'interaction ---
     def set_current_note(self, note_name):
@@ -47,34 +97,136 @@ class CordeWidget(QWidget):
         self.current_note = note_name
         self.update() # planifie un repaint du widget
 
+    def _nearest_node_frac(self, x: float) -> float:
+        """retourne la fraction du nœud le plus proche dans self._node_fracs."""
+        if not self._node_fracs:
+            return max(0.0, min(1.0, float(x)))
+        # recherche linéaire suffisante vu N ~ O(100); peut être optimisée si besoin
+        xf = max(0.0, min(1.0, float(x)))
+        fracs = self._node_fracs
+        # bornes rapides
+        if xf <= fracs[0]:
+            return fracs[0]
+        if xf >= fracs[-1]:
+            return fracs[-1]
+        # trouve intervalle
+        for i in range(1, len(fracs)):
+            if fracs[i] >= xf:
+                # choisir le plus proche entre i-1 et i
+                a, b = fracs[i - 1], fracs[i]
+                return a if (xf - a) <= (b - xf) else b
+        return fracs[-1]
+
+    def _step_to_neighbor_node(self, current: float, direction: int) -> float:
+        """retourne la fraction du nœud voisin à gauche/droite par rapport à current."""
+        fracs = self._node_fracs
+        if not fracs:
+            return max(0.0, min(1.0, current + (0.01 if direction > 0 else -0.01)))
+        # trouve l'indice du nœud le plus proche
+        xf = self._nearest_node_frac(current)
+        try:
+            idx = fracs.index(xf)
+        except ValueError:
+            # si valeurs flottantes non exactes, approxime par balayage
+            idx = 0
+            best_d = 1e9
+            for i, v in enumerate(fracs):
+                d = abs(v - xf)
+                if d < best_d:
+                    best_d, idx = d, i
+        # pas vers voisin
+        if direction > 0:
+            idx = min(idx + 1, len(fracs) - 1)
+        elif direction < 0:
+            idx = max(idx - 1, 0)
+        return fracs[idx]
+
+    def node_fracs(self):
+        """expose la liste des fractions de nœuds [0..1] (lecture seule)."""
+        return list(self._node_fracs)
+
+    def total_length_m(self) -> float:
+        """retourne la longueur totale en mètres (dérivée du backend ou 1.0 en fallback)."""
+        return float(self._total_length_m)
+
+    def frac_to_meters(self, frac: float) -> float:
+        """convertit une fraction [0..1] en position en mètres sur la corde."""
+        xf = max(0.0, min(1.0, float(frac)))
+        return xf * self._total_length_m
+
+    def nearest_node_index(self, x: float) -> int:
+        """retourne l'indice du nœud le plus proche pour une fraction x [0..1]."""
+        fracs = self._node_fracs
+        if not fracs:
+            return 0
+        xf = max(0.0, min(1.0, float(x)))
+        best_i, best_d = 0, 1e9
+        for i, v in enumerate(fracs):
+            d = abs(v - xf)
+            if d < best_d:
+                best_d, best_i = d, i
+        return best_i
+
+    def nearest_element_index(self, x: float) -> int:
+        """retourne l'indice d'élément j tel que fracs[j] <= x <= fracs[j+1]. Clampe à [0, n_elems-1]."""
+        fracs = self._node_fracs
+        if not fracs:
+            return 0
+        xf = max(0.0, min(1.0, float(x)))
+        # dernier cas: si sur le dernier nœud, renvoyer l'élément final
+        if xf >= fracs[-1]:
+            return max(0, len(fracs) - 2)
+        # trouver intervalle
+        for i in range(len(fracs) - 1):
+            if fracs[i] <= xf <= fracs[i + 1]:
+                return i
+        return 0
+
     def set_cursor_pos(self, pos_norm: float):
-        """définit la position du curseur (0..1)."""
-        self.cursor_pos = max(0.0, min(1.0, float(pos_norm)))
+        """définit la position du curseur (0..1), avec aimantation optionnelle aux nœuds."""
+        v = max(0.0, min(1.0, float(pos_norm)))
+        if self._snapToNodes:
+            v = self._nearest_node_frac(v)
+        self.cursor_pos = v
         self.update()
 
     def move_cursor(self, delta_norm: float):
-        """déplace le curseur par un incrément normalisé."""
-        self.set_cursor_pos(self.cursor_pos + float(delta_norm))
+        """déplace le curseur vers le nœud voisin (discret) si snapping actif; sinon incrément normalisé."""
+        if self._snapToNodes:
+            direction = 1 if float(delta_norm) > 0 else (-1 if float(delta_norm) < 0 else 0)
+            if direction != 0:
+                self.set_cursor_pos(self._step_to_neighbor_node(self.cursor_pos, direction))
+        else:
+            self.set_cursor_pos(self.cursor_pos + float(delta_norm))
 
     def set_strike_cursor_pos(self, pos_norm: float):
-        """définit la position du curseur d'attaque (0..1)."""
-        self.strike_cursor_pos = max(0.0, min(1.0, float(pos_norm)))
+        """définit la position du curseur d'attaque (0..1); applique le même snapping par défaut."""
+        v = max(0.0, min(1.0, float(pos_norm)))
+        if self._snapToNodes:
+            v = self._nearest_node_frac(v)
+        self.strike_cursor_pos = v
         self.update()
 
     def move_strike_cursor(self, delta_norm: float):
-        """déplace le curseur d'attaque par un incrément normalisé."""
-        self.set_strike_cursor_pos(self.strike_cursor_pos + float(delta_norm))
+        """déplace le curseur d'attaque vers le nœud voisin si snapping actif; sinon incrément normalisé."""
+        if self._snapToNodes:
+            direction = 1 if float(delta_norm) > 0 else (-1 if float(delta_norm) < 0 else 0)
+            if direction != 0:
+                self.set_strike_cursor_pos(self._step_to_neighbor_node(self.strike_cursor_pos, direction))
+        else:
+            self.set_strike_cursor_pos(self.strike_cursor_pos + float(delta_norm))
 
     def _fret_line_frac(self, f: int) -> float:
-        """retourne la fraction normalisée de la frette (ligne métallique) f (0..12), avec ajustement fin."""
+        """retourne la fraction normalisée de la frette (ligne métallique) f (0..12) via formule (12-TET-like).
+        La visualisation des frettes utilise la formule géométrique; les curseurs peuvent être aimantés aux nœuds réels."""
         f = max(0, min(12, int(f)))
         # Récupère l'exposant géométrique centralisé (config) si disponible
         try:
             from digital_twin.back_end import config as _cfg  # type: ignore
-            _exp = getattr(_cfg, 'FRET_EXPOSANT_GEOMETRIQUE', 8.0)
+            _exp = getattr(_cfg, 'FRET_EXPOSANT_GEOMETRIQUE', 12.0)
         except Exception:  # pragma: no cover
-            _exp = 8.0
-        base = 0.0 if f == 0 else 1.0 - (1.0 / (2 ** (f / _exp)))
+            _exp = 12.0
+        base = 0.0 if f == 0 else 1.0 - (1.0 / (2 ** (float(f) / float(_exp))))
         adj = 0.0 if f == 0 else float(self._fretAdjustFrac[f])
         # applique l'ajustement et limite à [0,1]
         v = max(0.0, min(1.0, base + adj))
@@ -117,21 +269,10 @@ class CordeWidget(QWidget):
         self.update()
 
     def set_cursor_by_fret(self, fret_index: int, press_bias: float = 0.9):
-        """
-        positionne le curseur dans la "maison" de la frette (entre deux frettes), proche de la frette cible.
-        - fret_index : 0..12 (0 = corde à vide). Pour f>=1, place entre f-1 et f, plus près de f.
-        - press_bias : proximité de la frette f (0.0 = collé à f-1, 1.0 = sur la ligne de f).
-        """
+        """place le curseur exactement sur la ligne de frette N (nœud N), 0..12.
+        La bias n'est pas utilisée lorsque l'aimantation aux nœuds est active."""
         fret_index = max(0, min(12, int(fret_index)))
-        if fret_index == 0:
-            self.set_cursor_pos(0.0)
-            return
-        prev_frac = self._fret_line_frac(fret_index - 1)
-        curr_frac = self._fret_line_frac(fret_index)
-        # garantit l'intervalle [0,1]
-        press_bias = max(0.0, min(1.0, float(press_bias)))
-        frac = prev_frac + (curr_frac - prev_frac) * press_bias
-        self.set_cursor_pos(frac)
+        self.set_cursor_pos(self._fret_line_frac(fret_index))
 
     def house_center_frac(self, house_index: int) -> float:
         """retourne la fraction normalisée du centre de la maison (entre frettes) house_index (1..12)."""
@@ -207,6 +348,27 @@ class CordeWidget(QWidget):
 
     strikeCursorColor = pyqtProperty(QColor, fget=getStrikeCursorColor, fset=setStrikeCursorColor)
 
+    def getBridgeColor(self):
+        return self._bridgeColor
+
+    def setBridgeColor(self, color):
+        self._bridgeColor = QColor(color)
+        self.update()
+
+    bridgeColor = pyqtProperty(QColor, fget=getBridgeColor, fset=setBridgeColor)
+
+    def getShowBridgeLabel(self) -> bool:
+        return bool(self._showBridgeLabel)
+
+    def setShowBridgeLabel(self, value: bool):
+        try:
+            self._showBridgeLabel = bool(value)
+        except Exception:
+            self._showBridgeLabel = True
+        self.update()
+
+    showBridgeLabel = pyqtProperty(bool, fget=getShowBridgeLabel, fset=setShowBridgeLabel)
+
     # --- propriétés d'ajustement/calibration ---
     def getGeometryOffsetFrac(self) -> float:
         return self._geometryOffsetFrac
@@ -267,7 +429,7 @@ class CordeWidget(QWidget):
 
     # --- tailles préférées ---
     def sizeHint(self) -> QSize:
-        return QSize(1000, max(180, self.minimumHeight()))
+        return QSize(1000, max(320, self.minimumHeight()))
 
     def clear_current_note(self):
         """efface la note mise en évidence."""
@@ -296,25 +458,28 @@ class CordeWidget(QWidget):
         left_pad = int(escala * (1.0 - float(self._scaleRightFrac)) / 2.0)
 
         # 1. dessine la corde principale
-        corda_pen = QPen(self._stringColor, 3, Qt.SolidLine)
+        # facteur d'échelle UI pour agrandir légèrement l'objet en fonction de la hauteur
+        ui_scale = max(1.0, min(1.5, float(height) / 240.0))
+
+        corda_pen = QPen(self._stringColor, 3 * ui_scale, Qt.SolidLine)
         painter.setPen(corda_pen)
         start_x = margin + left_pad + dx
         end_x = start_x + int(escala * self._scaleRightFrac)
         painter.drawLine(start_x, center_y, end_x, center_y)
 
-        # 2. dessine les 12 frettes
+        # 2. dessine les 12 frettes basées sur les nœuds du backend
         num_frettes = 12
         for traste in range(num_frettes + 1):
-            # utilise la fraction (modèle 12-TET + ajustements fins)
             frac = self._fret_line_frac(traste)
             x = margin + left_pad + escala * frac
             # sillet (frette 0) plus épais
             if traste == 0:
-                traste_pen = QPen(self._nutColor, 4)
+                traste_pen = QPen(self._nutColor, max(4, int(4 * ui_scale)))
             else:
-                traste_pen = QPen(self._fretColor, 2)
+                traste_pen = QPen(self._fretColor, max(2, int(2 * ui_scale)))
             painter.setPen(traste_pen)
-            painter.drawLine(int(x + dx), center_y - 28, int(x + dx), center_y + 28)
+            h = int(28 * ui_scale)
+            painter.drawLine(int(x + dx), center_y - h, int(x + dx), center_y + h)
             # ajoute la numérotation des frettes
             if traste > 0:
                 painter.setPen(self._fretTextColor)
@@ -322,22 +487,35 @@ class CordeWidget(QWidget):
                 painter.setFont(font)
                 painter.drawText(int(x + dx) - 8, center_y - 35, str(traste))
 
+        # 2b. dessine le rastilho (bridge) à l'extrémité droite de la corde visible
+        try:
+            # utiliser les mêmes dimensions que le sillet (frette 0)
+            nut_thickness = max(4, int(4 * ui_scale))
+            nut_h = int(28 * ui_scale)
+            bridge_pen = QPen(self._bridgeColor, nut_thickness, Qt.SolidLine)
+            painter.setPen(bridge_pen)
+            painter.drawLine(int(end_x), center_y - nut_h, int(end_x), center_y + nut_h)
+            # pas d'étiquette "R"
+        except Exception:
+            pass
+
         # 3. (pas de marqueurs de note) — seulement frettes et numérotation
 
         # 4. dessine le curseur principal
         # le curseur ne doit pas dépasser la fin visible de la corde (rendu seulement)
         cursor_vis = min(max(0.0, self.cursor_pos), self._scaleRightFrac)
         cursor_x = margin + left_pad + escala * cursor_vis + dx
-        cursor_pen = QPen(self._cursorColor, 4.4, Qt.DashLine)
+        cursor_pen = QPen(self._cursorColor, 4.4 * ui_scale, Qt.DashLine)
         painter.setPen(cursor_pen)
-        painter.drawLine(int(cursor_x), center_y - 36, int(cursor_x), center_y + 36)
+        c_h = int(36 * ui_scale)
+        painter.drawLine(int(cursor_x), center_y - c_h, int(cursor_x), center_y + c_h)
 
         # 5. dessine le curseur d'attaque (strike) en ligne pleine
         strike_vis = min(max(0.0, self.strike_cursor_pos), self._scaleRightFrac)
         strike_x = margin + left_pad + escala * strike_vis + dx
-        strike_pen = QPen(self._strikeCursorColor, 3.8, Qt.SolidLine)
+        strike_pen = QPen(self._strikeCursorColor, 3.8 * ui_scale, Qt.SolidLine)
         painter.setPen(strike_pen)
-        painter.drawLine(int(strike_x), center_y - 36, int(strike_x), center_y + 36)
+        painter.drawLine(int(strike_x), center_y - c_h, int(strike_x), center_y + c_h)
 
         # 6. dessine un marqueur de rosace (cercle) à la position indiquée
         #    utilise la couleur de la corde (stringColor) avec un remplissage translucide
@@ -346,7 +524,7 @@ class CordeWidget(QWidget):
         c_fill.setAlpha(36)
         painter.setPen(QPen(self._stringColor, 2))
         painter.setBrush(QBrush(c_fill))
-        r = int(self._soundholeRadiusPx)
+        r = int(self._soundholeRadiusPx * ui_scale)
         painter.drawEllipse(QPointF(float(soundhole_x), float(center_y)), float(r), float(r))
 
     def mousePressEvent(self, event):
@@ -371,6 +549,19 @@ class CordeWidget(QWidget):
                 self.clickedAt.emit(pos_norm)
             except Exception:
                 pass
+            # affiche une infobulle contextuelle avec les infos des curseurs
+            try:
+                QToolTip.showText(event.globalPos(), self._build_tooltip_text(), self)
+            except Exception:
+                pass
         except Exception:
             pass
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Met à jour l'infobulle pendant le survol pour refléter les infos de position."""
+        try:
+            self.setToolTip(self._build_tooltip_text())
+        except Exception:
+            pass
+        super().mouseMoveEvent(event)
