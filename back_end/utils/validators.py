@@ -68,17 +68,17 @@ def valider_mck(M: np.ndarray, C: np.ndarray, K: np.ndarray, *, verbose: bool = 
     if not ok:
         raise ValueError(f"[ERREUR] Échec de la vérification des dimensions: {msg}")
 
-    if verbose and dbg.is_enabled():
+    if verbose and getattr(dbg, "validators_enabled", None) and dbg.validators_enabled():
         dbg.dprint(f"Taille des matrices: {M.shape} (carrées)")
         dbg.dprint(f"Nombre de degrés de liberté (n): {n}")
 
-    if verbose and dbg.is_enabled():
+    if verbose and getattr(dbg, "validators_enabled", None) and dbg.validators_enabled():
         dbg.dprint(f"Symétrie: M={_is_symmetric(M)}, C={_is_symmetric(C)}, K={_is_symmetric(K)}")
 
     for name, A in (("M", M), ("C", C), ("K", K)):
         allow_zero = True if name == "C" else False
         ok_bc, msg_bc = _bc_applied_at_ends(A, allow_diag_zero=allow_zero)
-        if verbose and dbg.is_enabled():
+        if verbose and getattr(dbg, "validators_enabled", None) and dbg.validators_enabled():
             status = "OK" if ok_bc else "NOK"
             dbg.dprint(f"CL aux extrémités dans {name}: {status} — {msg_bc}")
         if not ok_bc:

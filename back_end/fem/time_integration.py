@@ -353,7 +353,7 @@ def integrer_newmark_beta(
     a4 = gamma / beta - 1.0
     a5 = dt * (gamma / (2.0 * beta) - 1.0)
 
-    if dbg.is_enabled():
+    if getattr(dbg, "is_verbose", None) and dbg.is_verbose():
         try:
             dbg.print_newmark_constants(dt=dt, beta=beta, gamma=gamma, a0=a0, a1=a1, a2=a2, a3=a3, a4=a4, a5=a5)
         except Exception:
@@ -373,6 +373,11 @@ def integrer_newmark_beta(
         A[constrained, 0] = 0.0
 
     sample = dbg.get_solver_sample_interval(n_steps)
+    fixed_every = 0
+    try:
+        fixed_every = int(getattr(dbg, 'get_fixed_step_interval', lambda: 0)() or 0)  # type: ignore[attr-defined]
+    except Exception:
+        fixed_every = 0
     for k in range(n_steps - 1):
         Uf_k = U[free, k]
         Vf_k = V[free, k]
@@ -406,7 +411,13 @@ def integrer_newmark_beta(
             V[constrained, k + 1] = 0.0
             A[constrained, k + 1] = 0.0
 
-        if dbg.is_enabled() and ((k + 1) % sample == 0 or k == 0):
+        should_print = False
+        if dbg.is_enabled():
+            if fixed_every and ((k + 1) % fixed_every == 0 or k == 0):
+                should_print = True
+            elif ((k + 1) % sample == 0 or k == 0):
+                should_print = True
+        if should_print:
             try:
                 dbg.print_step_snapshot(k + 1, t[k + 1], U[:, k + 1], V[:, k + 1], A[:, k + 1], M=M, K=K)
             except Exception:

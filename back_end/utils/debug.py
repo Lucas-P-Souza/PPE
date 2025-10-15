@@ -24,7 +24,16 @@ from __future__ import annotations
 from typing import Any, Callable
 
 _ENABLED: bool = False
+_LEVEL: str = "off"  # 'off' | 'concise' | 'verbose'
+_PRINT_STEPS: bool = True
+_PRINT_STEP_ENERGY: bool = False
+_SOLVER_SAMPLES_TARGET: int = 12
+_PRINT_RAYLEIGH_SUMMARY: bool = True
+_PRINT_RAYLEIGH_DETAILS: bool = False
+_PRINT_VALIDATORS: bool = True
+_PRINT_FINAL_ENERGY_SUMMARY: bool = True
 _PRINT_ONCE_FLAGS: dict[str, bool] = {}
+_FIXED_STEP_EVERY: int = 0
 
 # Initialisation depuis le module config si disponible
 try:  # pragma: no cover - best-effort import
@@ -34,9 +43,21 @@ try:  # pragma: no cover - best-effort import
     elif hasattr(_cfg, "DEBUG_RAYLEIGH"):
         # Rétrocompatibilité : on honore l'ancien indicateur si le nouveau est absent
         _ENABLED = bool(getattr(_cfg, "DEBUG_RAYLEIGH"))
+    # Niveau et flags adicionais (valeurs par défaut si absent)
+    _LEVEL = str(getattr(_cfg, "DEBUG_LEVEL", "off") or "off")
+    _PRINT_STEPS = bool(getattr(_cfg, "DEBUG_PRINT_STEPS", True))
+    _PRINT_STEP_ENERGY = bool(getattr(_cfg, "DEBUG_PRINT_STEP_ENERGY", False))
+    _SOLVER_SAMPLES_TARGET = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLES_TARGET", 12) or 12)
+    _PRINT_RAYLEIGH_SUMMARY = bool(getattr(_cfg, "DEBUG_PRINT_RAYLEIGH_SUMMARY", True))
+    _PRINT_RAYLEIGH_DETAILS = bool(getattr(_cfg, "DEBUG_PRINT_RAYLEIGH_DETAILS", False))
+    _PRINT_VALIDATORS = bool(getattr(_cfg, "DEBUG_PRINT_VALIDATORS", True))
+    _PRINT_FINAL_ENERGY_SUMMARY = bool(getattr(_cfg, "DEBUG_PRINT_FINAL_ENERGY_SUMMARY", True))
+    _FIXED_STEP_EVERY = int(getattr(_cfg, "DEBUG_STEP_EVERY", 0) or 0)
 except Exception:
     # Conserver la valeur False par défaut si l'import de config échoue
     _ENABLED = False
+    _LEVEL = "off"
+    _FIXED_STEP_EVERY = 0
 
 
 def set_enabled(value: bool) -> None:
@@ -48,6 +69,14 @@ def set_enabled(value: bool) -> None:
 def is_enabled() -> bool:
     # Retourne l'état actuel d'activation du débogage.
     return bool(_ENABLED)
+
+
+def is_concise() -> bool:
+    return _ENABLED and (_LEVEL.lower() == "concise")
+
+
+def is_verbose() -> bool:
+    return _ENABLED and (_LEVEL.lower() == "verbose")
 
 
 def dprint(*args: Any, prefix: str = "[DEBUG] ", sep: str = " ", end: str = "\n") -> None:
@@ -171,7 +200,25 @@ def print_rayleigh_explained(
 
         if print_once and not _should_print_once("rayleigh_explained"):
             return
-        dlazy(_make_msg, prefix="")
+        # Print detailed only if explicitly requested
+        if _PRINT_RAYLEIGH_DETAILS or is_verbose():
+            dlazy(_make_msg, prefix="")
+        elif _PRINT_RAYLEIGH_SUMMARY or is_concise():
+            # concise one-liner
+            try:
+                two_pi = 2.0 * __import__("numpy").pi
+                f_hz = __import__("numpy").asarray(omegas, dtype=float) / two_pi
+                p, q = modes_ref
+                omega_p = float(omegas[p]) if len(f_hz) > p else float("nan")
+                omega_q = float(omegas[q]) if len(f_hz) > q else float("nan")
+                zeta_p_chk = 0.5 * (alpha/omega_p + beta*omega_p) if omega_p > 0 else float("nan")
+                zeta_q_chk = 0.5 * (alpha/omega_q + beta*omega_q) if omega_q > 0 else float("nan")
+                dlazy(lambda: (
+                    f"[RAYLEIGH] α={alpha:.2e}, β={beta:.2e} | f_p={f_hz[p]:.1f}Hz, f_q={f_hz[q]:.1f}Hz | "
+                    f"ζ_p={zeta_p_chk:.4f} (target {zetas_ref[0]:.4f}), ζ_q={zeta_q_chk:.4f} (target {zetas_ref[1]:.4f})"
+                ), prefix="")
+            except Exception:
+                dlazy(lambda: f"[RAYLEIGH] α={alpha:.2e}, β={beta:.2e}", prefix="")
     except Exception as _e_dbg:
         dprint(f"[AVERTISSEMENT] Échec d'impression Rayleigh: {_e_dbg}")
 
@@ -459,12 +506,24 @@ def get_solver_sample_interval(n_steps: int) -> int:
     # Essaie config.DEBUG_SOLVER_SAMPLE, sinon ~50 échantillons sur la durée.
     try:
         from .. import config as _cfg  # type: ignore
-        val = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLE", 0))
-        if val and val > 0:
-            return val
+        # Prefer explicit target if present
+        target = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLES_TARGET", _SOLVER_SAMPLES_TARGET))
+        target = max(1, target)
+        return max(1, int(round(n_steps / target)))
     except Exception:
         pass
-    return max(1, int(n_steps // 50) or 1)
+    # Default heuristic: ~12 samples
+    return max(1, int(round(n_steps / max(1, _SOLVER_SAMPLES_TARGET))))
+
+
+def get_fixed_step_interval() -> int:
+    # Returns fixed step interval for printing. When >0, overrides sampling cadence.
+    try:
+        from .. import config as _cfg  # type: ignore
+        val = int(getattr(_cfg, "DEBUG_STEP_EVERY", _FIXED_STEP_EVERY))
+        return int(max(0, val))
+    except Exception:
+        return int(max(0, _FIXED_STEP_EVERY))
 
 
 def print_solver_setup_summary(M, C, K, *, dt: float, t_max: float, n_steps: int, constrained_idxs: list[int] | Any) -> None:
@@ -508,7 +567,7 @@ def print_newmark_constants(*, dt: float, beta: float, gamma: float, a0: float, 
 
 def print_step_snapshot(k: int, t_k: float, U_col, V_col, A_col, *, M=None, K=None, compute_energy: bool = True) -> None:
     # Imprime un résumé pour un pas de temps: max/min des états et énergies (optionnel).
-    if not is_enabled():
+    if not is_enabled() or not _PRINT_STEPS:
         return
     try:
         import numpy as np
@@ -518,8 +577,8 @@ def print_step_snapshot(k: int, t_k: float, U_col, V_col, A_col, *, M=None, K=No
         u_max = float(np.nanmax(np.abs(U_col)))
         v_max = float(np.nanmax(np.abs(V_col)))
         a_max = float(np.nanmax(np.abs(A_col)))
-        line = f"[STEP] k={k:6d} t={t_k:10.6e} | max|U|={u_max:.3e}, max|V|={v_max:.3e}, max|A|={a_max:.3e}"
-        if compute_energy and (M is not None) and (K is not None):
+        line = f"[STEP] k={k:6d} t={t_k:10.6e} | |U|max={u_max:.3e}, |V|max={v_max:.3e}, |A|max={a_max:.3e}"
+        if _PRINT_STEP_ENERGY and compute_energy and (M is not None) and (K is not None):
             try:
                 Ek = 0.5 * float(V_col.T @ (np.asarray(M) @ V_col))
                 Ep = 0.5 * float(U_col.T @ (np.asarray(K) @ U_col))
@@ -534,13 +593,21 @@ def print_step_snapshot(k: int, t_k: float, U_col, V_col, A_col, *, M=None, K=No
 
 def print_energy_start_end(*, t0: float, tn: float, Ek0: float, Ep0: float, Et0: float, Ekn: float, Epn: float, Etn: float) -> None:
     # Résumé simple des énergies au début et à la fin (utile pour vérifier la décroissance avec amortissement).
-    if not is_enabled():
+    if not is_enabled() or not _PRINT_FINAL_ENERGY_SUMMARY:
         return
     try:
-        drop = (Et0 - Etn) / Et0 * 100.0 if Et0 > 0 else float('nan')
+        drop = (Et0 - Etn) / Et0 * 100.0 if (Et0 is not None and Et0 > 0) else float('nan')
         dprint("[ENERGY] Début/Fin:", prefix="")
         dprint(f"  t0={t0:.6e}: Ek0={Ek0:.3e}, Ep0={Ep0:.3e}, Et0={Et0:.3e}", prefix="")
         dprint(f"  tn={tn:.6e}: Ekn={Ekn:.3e}, Epn={Epn:.3e}, Etn={Etn:.3e}", prefix="")
         dprint(f"  ΔEtot = {Et0 - Etn:.3e} ({drop:.2f}%)", prefix="")
     except Exception:
         pass
+
+
+def validators_enabled() -> bool:
+    return is_enabled() and _PRINT_VALIDATORS
+
+
+def rayleigh_summary_enabled() -> bool:
+    return is_enabled() and (_PRINT_RAYLEIGH_SUMMARY or is_concise())

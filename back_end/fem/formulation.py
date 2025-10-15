@@ -202,7 +202,7 @@ def rayleigh_damping(
     alpha = float(alpha_lin)            # [1/s]
     beta = float(beta_lin)              # [s]
     C = alpha * M + beta * K            # matrice d'amortissement globale
-    if dbg.is_enabled():  # information de débogage (centrée dans debug.py)
+    if getattr(dbg, "rayleigh_summary_enabled", None) and dbg.rayleigh_summary_enabled():
         try:
             dbg.print_rayleigh_explained(alpha, beta, omegas, modes_ref, zetas_ref, print_once=True)
         except Exception as _e_dbg:

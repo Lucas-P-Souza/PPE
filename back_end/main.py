@@ -1,7 +1,3 @@
-# Point d'entrée (historique) de la simulation backend.
-#
-# Lance la simulation FEM (maille non uniforme) avec amortissement de Rayleigh
-# depuis config, intègre avec Newmark-beta et sauvegarde des graphiques/animations.
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,8 +25,11 @@ try:
     from digital_twin.back_end.viz.plots import plot_first_modes, plot_snapshots_png, save_string_frame_png  # type: ignore
     from digital_twin.back_end.viz.anim import animate_string_motion  # type: ignore
     from digital_twin.back_end.io.exports import save_displacement_csv  # type: ignore
+    # Pression (appui de note) et intégration segmentée
+    from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
+    from digital_twin.back_end.fem.formulation import rayleigh_damping  # type: ignore
 except ModuleNotFoundError:
-    # Fallback when executed as a standalone script (ensure workspace root on sys.path)
+    # Solution de repli lors de l'exécution autonome (ajoute la racine du workspace au sys.path)
     import sys as _sys
     ROOT = Path(__file__).resolve().parents[2]
     if str(ROOT) not in _sys.path:
@@ -55,14 +54,21 @@ except ModuleNotFoundError:
     from digital_twin.back_end.viz.plots import plot_first_modes, plot_snapshots_png, save_string_frame_png  # type: ignore
     from digital_twin.back_end.viz.anim import animate_string_motion  # type: ignore
     from digital_twin.back_end.io.exports import save_displacement_csv  # type: ignore
+    from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
+    from digital_twin.back_end.fem.formulation import rayleigh_damping  # type: ignore
 
 
 def main() -> None:
     ROOT = Path(__file__).resolve().parents[2]
-    # Build M, K, C from config (frets mesh mandatory here)
+
+    # ==============================================
+    # SECTION 1 — CALCUL : Assemblage de M, C, K et validation
+    # (Aucun tracé ici ; uniquement la construction numérique)
+    # ==============================================
+    # Assemblage de M, K, C depuis la configuration (maillage des frettes requis)
     res = build_global_mkc_from_config(apply_fixed_bc=True, return_meta=True)
     if not (isinstance(res, tuple) and len(res) >= 3):
-        raise RuntimeError("Retorno inesperado de build_global_mkc_from_config")
+        raise RuntimeError("Retour inattendu de build_global_mkc_from_config")
     if len(res) == 4:
         M, K, C, meta = res
     else:
@@ -73,138 +79,144 @@ def main() -> None:
     # Validate shapes, symmetry and boundary conditions
     valider_mck(M, C, K, verbose=True)
 
-    # Simulation parameters
-    delta_t = float(getattr(_cfg, "DT", 1e-5))
-    T_total = float(getattr(_cfg, "T_SIM", 0.1))
+    # ==============================================
+    # SECTION 2 — CALCUL : Paramètres de simulation
+    # ==============================================
+    # Paramètres de simulation
+    delta_t = float(getattr(_cfg, "DT", 1e-4))
+    nos_press = [6, 11, 17, 21, 25, 29, 34, 38, 41, 44, 48, 51]
+    #nos_press = [6]
+    dur_press = 1  # duração da pressão em cada nó
+    t0 = 0.0
+    exc_times = []
+    press_events = []
+    for node_press in nos_press:
+        t_press_on = t0
+        t_pinc = t_press_on + 0.1  # pincamento logo após pressionar
+        t_press_off = t_press_on + dur_press
+        exc_times.append(t_pinc)
+        press_events.append(PressEvent(node=node_press, t_on=t_press_on, t_off=t_press_off, ks=5e4, cs=0.0))
+        t0 = t_press_off  # próximo nó pressionado imediatamente após soltar o anterior
+    T_total = t0 + 0.5
     definir_parametres_simulation(delta_t, T_total)
 
-    # Initial conditions: string initially flat and at rest (U0=0, V0=0)
+    # ==============================================
+    # SECTION 3 — CALCUL : Conditions initiales et premier pas
+    # ==============================================
+    # Conditions initiales : corde initialement à plat et au repos (U0=0, V0=0)
     L_eff = float(getattr(_cfg, "L", 1.0))
     U0 = np.zeros(M.shape[0], dtype=float)
     U_nm1 = U0.copy()
     U_n = U0.copy()
     print(f"U0 initialisé: shape={U0.shape}, max={np.nanmax(U0):.3e}, min={np.nanmin(U0):.3e}")
 
-    # First step via central differences (diagnostic)
+    # Premier pas via différences centrales (diagnostic)
     _ = calculer_u1(M, C, K, U_n=U_n, U_nm1=U_nm1, delta_t=delta_t)
 
-    # Modal analysis and plot of first modes
+    # ==============================================
+    # SECTION 4 — CALCUL : Analyse modale (calcul uniquement)
+    # (Le tracé des modes sera fait en POST-TRAITEMENT)
+    # ==============================================
+    # Analyse modale
     n = M.shape[0]
     x_coords = build_node_positions_from_config(n)
     freqs_hz, modes_full = compute_modal_frequencies_and_modes(M, K, num_modes=4)
     print("Premières fréquences (Hz):", np.round(freqs_hz, 3))
-    plots_dir = ROOT / "digital_twin" / "back_end" / "results" / "plots"
-    if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):
-        plots_dir.mkdir(parents=True, exist_ok=True)
-        plot_first_modes(x_coords, modes_full, freqs_hz, max_modes=4, savepath=str(plots_dir / "modes_first4.png"))
 
-    # Newmark-beta integration with external localized force(s)
-    # External localized force (trapezoidal envelope) at node derived from PLUCK_POS
+    # ==============================================
+    # SECTION 5 — CALCUL : Définition des forces externes et intégration
+    # (Aucun tracé ici ; uniquement l'intégration Newmark-β)
+    # ==============================================
+    # Intégration Newmark-β avec force(s) localisée(s)
+    # Force localisée (enveloppe trapézoïdale) au nœud dérivé de PLUCK_POS
     V0_zero = np.zeros(n, dtype=float)
-    # Map PLUCK_POS in [0,1] to a node index (closest)
+    # Projection de PLUCK_POS dans [0,1] vers l'indice de nœud le plus proche
     x_coords = build_node_positions_from_config(n)
     x_p_rel = float(getattr(_cfg, "PLUCK_POS", 0.25))
     x_force = float(x_p_rel * L_eff)
     i_force = int(np.argmin(np.abs(x_coords - x_force)))
-    # Envelope parameters (fallback defaults)
+    # Paramètres d'enveloppe (valeurs par défaut de repli)
     F_max = float(getattr(_cfg, "EXCITATION_F_MAX", 1.0))
     t_rise = float(getattr(_cfg, "EXCITATION_T_RISE", 0.01))
     t_hold = float(getattr(_cfg, "EXCITATION_T_HOLD", 0.03))
     t_decay = float(getattr(_cfg, "EXCITATION_T_DECAY", 0.005))
-    # First excitation at t0 = 0
-    F1 = fournisseur_force_localisee(n, i_force, F_max, t_rise, t_hold, t_decay, t0=0.0)
-    # Second excitation at configurable time (ensure T_SIM > second_t0 + envelope)
-    #second_t0 = float(getattr(_cfg, "EXCITATION_SECOND_T0", 0.6))
-    second_t0 = None
-    if second_t0 is not None and second_t0 > 0.0:
-        F2 = fournisseur_force_localisee(n, i_force, F_max, t_rise, t_hold, t_decay, t0=second_t0)
-        F_total = somme_de_forces(n, F1, F2)
-    else:
-        F_total = F1
+    # -------------------------------------------------------------------------
+    # Scénario demandé (chronologie):
+    #   1) Exciter la corde (pincement) à t = 0
+    #   2) Attendre un peu (pas de force)
+    #   3) Appuyer une note (pression locale) pendant une fenêtre [t_on, t_off]
+    #   4) Toujours avec la note APPUYÉE, attendre encore un peu
+    #   5) Toujours avec la note APPUYÉE, exciter la corde à nouveau (deuxième pincement)
+    #
+    # Mise en œuvre:
+    #   - Les « attentes » sont des intervalles sans force externe.
+    #   - La « pression » est modélisée par un PressEvent (raideur locale au nœud choisi).
+    #   - Le 2e pincement se produit À L'INTÉRIEUR de la fenêtre de pression.
+    # -------------------------------------------------------------------------
 
-    # Helper: shift a force provider by a global time offset (for chunked runs)
+    # Gerar fornecedores de força para cada pincamento
+    F_list = [fournisseur_force_localisee(n, i_force, F_max, t_rise, t_hold, t_decay, t0=tt) for tt in exc_times]
+    F_total = F_list[0]
+    for F in F_list[1:]:
+        F_total = somme_de_forces(n, F_total, F)
+
+    # Aide : décaler un fournisseur de force par un offset temporel global (exécution par segments)
     def decaler_force(F_base, t_offset: float):
         def F_shift(t: float, k: int):
             return F_base(float(t) + float(t_offset), k)
         return F_shift
 
-    # Option: extend simulation in chunks until motion decays (or max seconds)
-    if bool(getattr(_cfg, "AUTO_EXTEND_SIM", False)):
-        max_total = float(getattr(_cfg, "MAX_SIM_SECONDS", max(T_total, 2.0)))
-        chunk_sec = float(getattr(_cfg, "CHUNK_SECONDS", T_total))
-        stop_win = float(getattr(_cfg, "STOP_WINDOW_SEC", 0.2))
-        th_u = float(getattr(_cfg, "STOP_THRESH_U", 1e-6))
-        th_v = float(getattr(_cfg, "STOP_THRESH_V", 1e-4))
+    # Activer la PRESSION (appui de note) pendant [press_t_on, press_t_off]
+    #  - Étendre press_t_off si nécessaire pour couvrir TOUTE l'enveloppe du 2e pincement
+    #    (afin que le 2e pincement se passe encore avec la note appuyée)
+    #  - Choix du nœud à appuyer: config.PRESS_NODE_INDEX (sinon ~30% de la longueur, en nœud interne)
+    #  - Raideur locale et amortissement additionnel: PRESS_KS et PRESS_CS (cs=0 → amortissement Rayleigh seulement)
+    # ...existing code...
 
-        t_lists: list[np.ndarray] = []
-        U_lists: list[np.ndarray] = []
-        V_lists: list[np.ndarray] = []
-        A_lists: list[np.ndarray] = []
+    # Paramètres de Rayleigh pour les segments: (α, β) issus de meta si possible; sinon recalcul par sécurité
+    try:
+        alpha = float(meta.get('alpha')) if isinstance(meta, dict) and ('alpha' in meta) else None  # type: ignore[arg-type]
+        beta = float(meta.get('beta')) if isinstance(meta, dict) and ('beta' in meta) else None  # type: ignore[arg-type]
+    except Exception:
+        alpha, beta = None, None
+    if (alpha is None) or (beta is None):
+        try:
+            modes_ref = getattr(_cfg, "DAMPING_MODES_REF")
+            zetas_ref = getattr(_cfg, "DAMPING_ZETAS_REF")
+            alpha, beta, _, _ = rayleigh_damping(M, K, modes_ref, zetas_ref)
+        except Exception as _e_rb:  # pragma: no cover
+            raise RuntimeError("Impossible de déterminer α et β (Rayleigh) pour la simulation avec pression") from _e_rb
 
-        t_acc = 0.0
-        U_prev = U0.copy()
-        V_prev = V0_zero.copy()
-        A_prev = None  # let integrator compute from F at each chunk start
-        first_chunk = True
-        while t_acc < max_total - 1e-15:
-            t_chunk = min(chunk_sec, max_total - t_acc)
-            F_shift = decaler_force(F_total, t_acc)
-            t_loc, U_loc, V_loc, A_loc = integrer_newmark_beta(
-                M, C, K, F_shift, dt=delta_t, t_max=t_chunk, U0=U_prev, V0=V_prev, A0=A_prev
-            )
-            # Convert to global time and append (avoid duplicating the initial sample after the first chunk)
-            if first_chunk:
-                t_lists.append(t_loc + t_acc)
-                U_lists.append(U_loc)
-                V_lists.append(V_loc)
-                A_lists.append(A_loc)
-                first_chunk = False
-            else:
-                t_lists.append(t_loc[1:] + t_acc)
-                U_lists.append(U_loc[:, 1:])
-                V_lists.append(V_loc[:, 1:])
-                A_lists.append(A_loc[:, 1:])
+    # Intégration unique sur [0, T_total] avec évènement de pression et deux pincements (F_total)
+    t_vec, U_hist, V_hist, A_hist = simulate_with_press(
+        M, K, alpha, beta, F_total, delta_t, press_events, T_total, U0=U0, V0=V0_zero
+    )
 
-            # Prepare for next chunk
-            U_prev = U_loc[:, -1]
-            V_prev = V_loc[:, -1]
-            A_prev = A_loc[:, -1]
+    # ==============================================
+    # SECTION 6 — POST-TRAITEMENT : enregistrer CSV, générer PLOTS, FFT, GIFs
+    # (UNIQUEMENT des sorties visuelles/fichiers — pas de nouveau calcul de dynamique)
+    # ==============================================
+    plots_dir = ROOT / "digital_twin" / "back_end" / "results" / "plots"
 
-            # Stop condition: check last window within this chunk
-            if stop_win > 0.0:
-                n_last = max(1, int(round(stop_win / delta_t)))
-                U_tail = U_loc[:, -n_last:]
-                V_tail = V_loc[:, -n_last:]
-                if np.nanmax(np.abs(U_tail)) < th_u and np.nanmax(np.abs(V_tail)) < th_v:
-                    t_acc += t_loc[-1]
-                    break
-
-            t_acc += t_loc[-1]
-
-        # Concatenate histories
-        t_vec = np.concatenate(t_lists, axis=0)
-        U_hist = np.concatenate(U_lists, axis=1)
-        V_hist = np.concatenate(V_lists, axis=1)
-        A_hist = np.concatenate(A_lists, axis=1)
-    else:
-        # Single-shot integration over T_total
-        t_vec, U_hist, V_hist, A_hist = integrer_newmark_beta(
-            M, C, K, F_total, dt=delta_t, t_max=T_total, U0=U0, V0=V0_zero, A0=None
-        )
-
-    # Save CSV of string positions over time
+    # 6.1) CSV des déplacements en fonction du temps (sortie de données)
     if bool(getattr(_cfg, "OUTPUT_ENABLE_CSV", True)):
         plots_dir.mkdir(parents=True, exist_ok=True)
         csv_path = plots_dir / "string_positions.csv"
         save_displacement_csv(t_vec, U_hist, str(csv_path))
 
-    # Displacement over time for a representative node
+    # 6.2) PLOTS — Modes (utilise le résultat de l'analyse modale déjà calculée)
+    if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):
+        plots_dir.mkdir(parents=True, exist_ok=True)
+        plot_first_modes(x_coords, modes_full, freqs_hz, max_modes=4, savepath=str(plots_dir / "modes_first4.png"))
+
+    # 6.3) PLOTS — Déplacement à un nœud représentatif et énergies
     if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):
         try:
             import matplotlib.pyplot as plt  # type: ignore
         except Exception as _eplt:  # pragma: no cover
             print("[AVERTISSEMENT] matplotlib indisponible pour tracer x(t):", _eplt)
         else:
+            # Déplacement x(t) au nœud choisi
             node_idx = max(1, n // 3)
             plt.figure(figsize=(8, 4))
             plt.plot(t_vec, U_hist[node_idx, :], lw=1.2)
@@ -216,7 +228,7 @@ def main() -> None:
             plt.tight_layout(); plt.savefig(outp, dpi=150); plt.close()
             print(f"[INFO] Tracé de x(t) enregistré dans: {outp}")
 
-            # Énergies
+            # Énergies en fonction du temps
             Ek, Ep, Et = calculer_energies_dans_le_temps(M, K, U_hist, V_hist)
             plt.figure(figsize=(9, 5))
             plt.plot(t_vec, Ek, label="E cinétique")
@@ -231,12 +243,12 @@ def main() -> None:
             plt.tight_layout(); plt.savefig(outpE, dpi=150); plt.close()
             print(f"[INFO] Tracé des énergies enregistré dans: {outpE}")
 
-    # FFT at output node
+    # 6.4) FFT (et spectrogramme en option)
     out_node = int(getattr(_cfg, "OUTPUT_NODE", max(1, n // 2)))
     out_node = max(0, min(n - 1, out_node))
     if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):
         plots_dir.mkdir(parents=True, exist_ok=True)
-        # Choose FFT style
+        # Choix du style de FFT
         _style = str(getattr(_cfg, "FFT_STYLE", "logdb")).lower()
         if _style == "linear":
             fft_path = plots_dir / "newmark_output_fft.png"
@@ -261,9 +273,25 @@ def main() -> None:
                 use_velocity, color_hex, db_offset_cfg = False, "#4c78a8", 0.0
                 bpo_cfg, oct_smooth_cfg, smooth_domain_cfg = None, 0.0, "db"
             _sig = V_hist[out_node, :] if use_velocity else U_hist[out_node, :]
-            tracer_fft_logdb_remplie(_sig, delta_t, str(fft_logdb_path), fmin=fmin_cfg, fmax=fmax_cfg, min_db=min_db_cfg, smooth_window=smooth_w_cfg, color=color_hex, annotate_peaks=True, n_peaks=8, title=f"FFT — nœud {out_node} (log f, dB)", db_offset=db_offset_cfg, log_bins_per_octave=bpo_cfg, octave_smoothing=oct_smooth_cfg, smooth_domain=smooth_domain_cfg)
+            tracer_fft_logdb_remplie(
+                _sig,
+                delta_t,
+                str(fft_logdb_path),
+                fmin=fmin_cfg,
+                fmax=fmax_cfg,
+                min_db=min_db_cfg,
+                smooth_window=smooth_w_cfg,
+                color=color_hex,
+                annotate_peaks=True,
+                n_peaks=8,
+                title=f"FFT — nœud {out_node} (log f, dB)",
+                db_offset=db_offset_cfg,
+                log_bins_per_octave=bpo_cfg,
+                octave_smoothing=oct_smooth_cfg,
+                smooth_domain=smooth_domain_cfg,
+            )
 
-        # Optional spectrogram
+        # Spectrogramme (optionnel)
         try:
             if bool(getattr(_cfg, "ENABLE_SPECTROGRAM", False)):
                 sp_fmin = float(getattr(_cfg, "SPECTROGRAM_FMIN", 0.0))
@@ -274,25 +302,22 @@ def main() -> None:
                 sp_ovlp = float(getattr(_cfg, "SPECTROGRAM_OVERLAP", 0.5))
                 sp_cmap = str(getattr(_cfg, "SPECTROGRAM_CMAP", "magma"))
                 sp_path = plots_dir / "newmark_output_spectrogram.png"
-                plot_spectrogram(U_hist[out_node, :], delta_t, str(sp_path), fmin=sp_fmin, fmax=sp_fmax, nperseg=sp_nperseg, overlap_frac=sp_ovlp, cmap=sp_cmap)
+                plot_spectrogram(
+                    U_hist[out_node, :],
+                    delta_t,
+                    str(sp_path),
+                    fmin=sp_fmin,
+                    fmax=sp_fmax,
+                    nperseg=sp_nperseg,
+                    overlap_frac=sp_ovlp,
+                    cmap=sp_cmap,
+                )
         except Exception:
             pass
 
-    # Animation and first-frame PNG
+    # 6.5) GIFs d'animation et PNG de la première image
     if bool(getattr(_cfg, "OUTPUT_ENABLE_GIFS", True)):
         plots_dir.mkdir(parents=True, exist_ok=True)
-        # -- Old single GIF (commented):
-        # anim_path = plots_dir / "string_motion.gif"
-        # animate_string_motion(
-        #     x_coords,
-        #     U_hist,
-        #     interval_ms=30,
-        #     decim=5,
-        #     savepath=str(anim_path),
-        #     show=False,
-        #     y_scale=_y_scale,
-        #     y_pad_frac=_y_pad,
-        # )
 
         try:
             _y_scale = float(getattr(_cfg, "ANIM_Y_SCALE", 1.0))
@@ -305,25 +330,20 @@ def main() -> None:
             _fps_slow, _fps_real = 33, 30
             _decim_slow = 5
 
-        # Compute interval in ms from FPS
+        # Intervalles (ms) à partir du FPS
         _int_ms_slow = max(1, int(round(1000.0 / max(1, _fps_slow))))
         _int_ms_real = max(1, int(round(1000.0 / max(1, _fps_real))))
 
-        # Compute decimation for true real-time playback:
-        # decim_real ≈ 1 / (dt * fps)
+        # Décimation pour une lecture en temps réel : decim_real ≈ 1 / (dt * fps)
         decim_real = max(1, int(round(1.0 / (delta_t * max(1, _fps_real)))))
-        # Slow-motion options priority:
-        # A) Absolute duration target: ANIM_SLOW_DURATION_S
-        # B) Relative factor: ANIM_SLOW_FACTOR (duration_slow ≈ factor * duration_real)
-        # C) Fallback: ANIM_DECIM_SLOW heuristic
+
+        # Stratégie pour le GIF « lent »
         total_steps = int(U_hist.shape[1])
         slow_duration_target = getattr(_cfg, "ANIM_SLOW_DURATION_S", None)
         if slow_duration_target is not None:
             try:
                 T_target = max(1.0, float(slow_duration_target))
-                # frames_needed = T_target * fps_slow
                 frames_needed = max(1.0, T_target * float(_fps_slow))
-                # decim_slow ≈ total_steps / frames_needed
                 decim_slow = max(1, int(round(float(total_steps) / frames_needed)))
             except Exception:
                 decim_slow = max(1, decim_real // max(1, _decim_slow))
@@ -333,22 +353,28 @@ def main() -> None:
                 try:
                     SF = max(1.0, float(_slow_factor))
                 except Exception:
-                    SF = float(max(1, _decim_slow))  # robust fallback
-                decim_slow = max(1, int(round(decim_real * (float(_fps_real) / max(1.0, float(_fps_slow) * SF)))))
+                    SF = float(max(1, _decim_slow))
+                decim_slow = max(
+                    1,
+                    int(round(decim_real * (float(_fps_real) / max(1.0, float(_fps_slow) * SF)))),
+                )
             else:
-                # Fallback: smaller decimation than real-time → more frames → slower playback
                 decim_slow = max(1, decim_real // max(1, _decim_slow))
 
-        # Debug info: effective durations and ratio
+        # Informations de diagnostic des animations
         frames_real = max(1, total_steps // int(decim_real))
         frames_slow = max(1, total_steps // int(decim_slow))
         dur_real = frames_real / max(1, _fps_real)
         dur_slow = frames_slow / max(1, _fps_slow)
         ratio = dur_slow / max(1e-12, dur_real)
-        print(f"[ANIM] real: decim={decim_real}, fps={_fps_real}, frames={frames_real}, duration≈{dur_real:.2f}s")
-        print(f"[ANIM] slow: decim={decim_slow}, fps={_fps_slow}, frames={frames_slow}, duration≈{dur_slow:.2f}s (x{ratio:.2f} slower)")
+        print(
+            f"[ANIM] real: decim={decim_real}, fps={_fps_real}, frames={frames_real}, duration≈{dur_real:.2f}s"
+        )
+        print(
+            f"[ANIM] slow: decim={decim_slow}, fps={_fps_slow}, frames={frames_slow}, duration≈{dur_slow:.2f}s (x{ratio:.2f} slower)"
+        )
 
-        # 1) Real-time GIF
+        # GIF 1 — Temps réel
         anim_real = plots_dir / "string_motion_real.gif"
         animate_string_motion(
             x_coords,
@@ -361,7 +387,7 @@ def main() -> None:
             y_pad_frac=_y_pad,
         )
 
-        # 2) Slow GIF (decimated frames)
+        # GIF 2 — Ralenti
         anim_slow = plots_dir / "string_motion_slow.gif"
         animate_string_motion(
             x_coords,
@@ -374,15 +400,23 @@ def main() -> None:
             y_pad_frac=_y_pad,
         )
 
+        # PNG de la première image (utile pour l'aperçu)
         if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):
             png0 = plots_dir / "string_motion_t0.png"
             try:
                 _frame_y_scale = getattr(_cfg, "ANIM_Y_SCALE", None)
             except Exception:
                 _frame_y_scale = None
-            save_string_frame_png(x_coords, U_hist, frame_idx=0, savepath=str(png0), y_scale=_frame_y_scale, y_pad_frac=_y_pad)
+            save_string_frame_png(
+                x_coords,
+                U_hist,
+                frame_idx=0,
+                savepath=str(png0),
+                y_scale=_frame_y_scale,
+                y_pad_frac=_y_pad,
+            )
 
-    # Static multi-time snapshots PNG
+    # 6.6) PLOT — Profils à des temps sélectionnés (instantanés)
     try:
         n_snap = int(getattr(_cfg, "SNAPSHOTS_COUNT", 8))
         snap_decim = int(getattr(_cfg, "SNAPSHOTS_DECIM", 10))
