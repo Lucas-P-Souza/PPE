@@ -187,24 +187,11 @@ SNAPSHOTS_SHOW_LEGEND = False    # True / False
 # Agora todas as flags de debug dependem apenas de DEBUG_ENABLED.
 DEBUG_ENABLED: bool = True
 
-# Mantemos a variável por compatibilidade (existia antes)
-DEBUG_LEVEL: str = "concise"     # mantido apenas como referência
-
-# Todas as flags antigas agora são espelhos exatos de DEBUG_ENABLED.
-# Isso garante que basta ligar/desligar uma variável para ativar/desativar
-# TODO: se quiser granularidade novamente, podemos reintroduzir níveis depois.
-DEBUG_PRINT_RAYLEIGH_SUMMARY: bool = DEBUG_ENABLED
-DEBUG_PRINT_RAYLEIGH_DETAILS: bool = DEBUG_ENABLED
-DEBUG_PRINT_VALIDATORS: bool = DEBUG_ENABLED
-
+# Apenas a variável canônica ON/OFF e os parâmetros numéricos permanecem.
+# Use `DEBUG_ENABLED` para ligar/desligar todos os comportamentos de debug.
+# Parâmetros numéricos relacionados a debug que continuam disponíveis:
 DEBUG_SOLVER_SAMPLES_TARGET: int = 12
-
-DEBUG_PRINT_STEP_ENERGY: bool = DEBUG_ENABLED
-DEBUG_PRINT_STEPS: bool = DEBUG_ENABLED
 DEBUG_STEP_EVERY: int = 0
-DEBUG_PRINT_FINAL_ENERGY_SUMMARY: bool = DEBUG_ENABLED
-
-DEBUG_RAYLEIGH: bool = DEBUG_ENABLED
 
 # Interrupteurs pour activer/désactiver les sorties de fichiers (pour débogage terminal uniquement)
 # - OUTPUT_ENABLE_IMAGES : contrôle tous les PNG (modes, x(t), énergies, FFT, snapshots, frame t0)

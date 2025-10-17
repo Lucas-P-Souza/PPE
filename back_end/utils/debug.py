@@ -8,8 +8,7 @@
 #   - matrix_stats / print_blocks / bc_edge_sums : résumés rapides via NumPy
 #
 # Bascule par défaut issue de digital_twin.back_end.config :
-# - DEBUG_ENABLED (préféré)
-# - Rétrocompatibilité avec DEBUG_RAYLEIGH si présent
+# - DEBUG_ENABLED (préféré). If DEBUG_RAYLEIGH is still present in an older config, it will be honored as a fallback.
 #
 # Usage
 # from digital_twin.back_end.utils import debug as dbg
@@ -24,39 +23,29 @@ from __future__ import annotations
 from typing import Any, Callable
 
 _ENABLED: bool = False
-_LEVEL: str = "off"  # 'off' | 'concise' | 'verbose'
 _PRINT_STEPS: bool = True
-_PRINT_STEP_ENERGY: bool = False
 _SOLVER_SAMPLES_TARGET: int = 12
 _PRINT_RAYLEIGH_SUMMARY: bool = True
 _PRINT_RAYLEIGH_DETAILS: bool = False
 _PRINT_VALIDATORS: bool = True
-_PRINT_FINAL_ENERGY_SUMMARY: bool = True
 _PRINT_ONCE_FLAGS: dict[str, bool] = {}
 _FIXED_STEP_EVERY: int = 0
 
 # Initialisation depuis le module config si disponible
 try:  # pragma: no cover - best-effort import
     from .. import config as _cfg  # type: ignore
-    if hasattr(_cfg, "DEBUG_ENABLED"):
-        _ENABLED = bool(getattr(_cfg, "DEBUG_ENABLED"))
-    elif hasattr(_cfg, "DEBUG_RAYLEIGH"):
-        # Rétrocompatibilité : on honore l'ancien indicateur si le nouveau est absent
-        _ENABLED = bool(getattr(_cfg, "DEBUG_RAYLEIGH"))
-    # Niveau et flags adicionais (valeurs par défaut si absent)
-    _LEVEL = str(getattr(_cfg, "DEBUG_LEVEL", "off") or "off")
-    _PRINT_STEPS = bool(getattr(_cfg, "DEBUG_PRINT_STEPS", True))
-    _PRINT_STEP_ENERGY = bool(getattr(_cfg, "DEBUG_PRINT_STEP_ENERGY", False))
-    _SOLVER_SAMPLES_TARGET = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLES_TARGET", 12) or 12)
-    _PRINT_RAYLEIGH_SUMMARY = bool(getattr(_cfg, "DEBUG_PRINT_RAYLEIGH_SUMMARY", True))
-    _PRINT_RAYLEIGH_DETAILS = bool(getattr(_cfg, "DEBUG_PRINT_RAYLEIGH_DETAILS", False))
-    _PRINT_VALIDATORS = bool(getattr(_cfg, "DEBUG_PRINT_VALIDATORS", True))
-    _PRINT_FINAL_ENERGY_SUMMARY = bool(getattr(_cfg, "DEBUG_PRINT_FINAL_ENERGY_SUMMARY", True))
-    _FIXED_STEP_EVERY = int(getattr(_cfg, "DEBUG_STEP_EVERY", 0) or 0)
+    # Prefer explicit DEBUG_ENABLED; fallback to DEBUG_RAYLEIGH if present for older configs.
+    _ENABLED = bool(getattr(_cfg, "DEBUG_ENABLED", getattr(_cfg, "DEBUG_RAYLEIGH", _ENABLED)))
+    _PRINT_STEPS = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
+    _PRINT_STEP_ENERGY = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED)) and bool(getattr(_cfg, "DEBUG_PRINT_STEP_ENERGY", False))
+    _SOLVER_SAMPLES_TARGET = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLES_TARGET", _SOLVER_SAMPLES_TARGET) or _SOLVER_SAMPLES_TARGET)
+    _PRINT_RAYLEIGH_SUMMARY = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
+    _PRINT_RAYLEIGH_DETAILS = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED)) and bool(getattr(_cfg, "DEBUG_PRINT_RAYLEIGH_DETAILS", False))
+    _PRINT_VALIDATORS = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
+    _FIXED_STEP_EVERY = int(getattr(_cfg, "DEBUG_STEP_EVERY", _FIXED_STEP_EVERY) or _FIXED_STEP_EVERY)
 except Exception:
     # Conserver la valeur False par défaut si l'import de config échoue
     _ENABLED = False
-    _LEVEL = "off"
     _FIXED_STEP_EVERY = 0
 
 
@@ -72,11 +61,13 @@ def is_enabled() -> bool:
 
 
 def is_concise() -> bool:
-    return _ENABLED and (_LEVEL.lower() == "concise")
+    # Concise mode folded into simple ON/OFF: when debug is enabled, concise prints are allowed.
+    return bool(_ENABLED)
 
 
 def is_verbose() -> bool:
-    return _ENABLED and (_LEVEL.lower() == "verbose")
+    # Verbose mode folded into simple ON/OFF: verbose prints are allowed when debug is enabled.
+    return bool(_ENABLED)
 
 
 def dprint(*args: Any, prefix: str = "[DEBUG] ", sep: str = " ", end: str = "\n") -> None:
@@ -563,47 +554,6 @@ def print_newmark_constants(*, dt: float, beta: float, gamma: float, a0: float, 
         dprint(f"  a0={a0:.3e}, a1={a1:.3e}, a2={a2:.3e}, a3={a3:.3e}, a4={a4:.3e}, a5={a5:.3e}", prefix="")
     except Exception:
         pass
-
-
-def print_step_snapshot(k: int, t_k: float, U_col, V_col, A_col, *, M=None, K=None, compute_energy: bool = True) -> None:
-    # Imprime un résumé pour un pas de temps: max/min des états et énergies (optionnel).
-    if not is_enabled() or not _PRINT_STEPS:
-        return
-    try:
-        import numpy as np
-        U_col = np.asarray(U_col, dtype=float).reshape(-1)
-        V_col = np.asarray(V_col, dtype=float).reshape(-1)
-        A_col = np.asarray(A_col, dtype=float).reshape(-1)
-        u_max = float(np.nanmax(np.abs(U_col)))
-        v_max = float(np.nanmax(np.abs(V_col)))
-        a_max = float(np.nanmax(np.abs(A_col)))
-        line = f"[STEP] k={k:6d} t={t_k:10.6e} | |U|max={u_max:.3e}, |V|max={v_max:.3e}, |A|max={a_max:.3e}"
-        if _PRINT_STEP_ENERGY and compute_energy and (M is not None) and (K is not None):
-            try:
-                Ek = 0.5 * float(V_col.T @ (np.asarray(M) @ V_col))
-                Ep = 0.5 * float(U_col.T @ (np.asarray(K) @ U_col))
-                Et = Ek + Ep
-                line += f" | Ek={Ek:.3e}, Ep={Ep:.3e}, Et={Et:.3e}"
-            except Exception:
-                pass
-        dprint(line)
-    except Exception:
-        pass
-
-
-def print_energy_start_end(*, t0: float, tn: float, Ek0: float, Ep0: float, Et0: float, Ekn: float, Epn: float, Etn: float) -> None:
-    # Résumé simple des énergies au début et à la fin (utile pour vérifier la décroissance avec amortissement).
-    if not is_enabled() or not _PRINT_FINAL_ENERGY_SUMMARY:
-        return
-    try:
-        drop = (Et0 - Etn) / Et0 * 100.0 if (Et0 is not None and Et0 > 0) else float('nan')
-        dprint("[ENERGY] Début/Fin:", prefix="")
-        dprint(f"  t0={t0:.6e}: Ek0={Ek0:.3e}, Ep0={Ep0:.3e}, Et0={Et0:.3e}", prefix="")
-        dprint(f"  tn={tn:.6e}: Ekn={Ekn:.3e}, Epn={Epn:.3e}, Etn={Etn:.3e}", prefix="")
-        dprint(f"  ΔEtot = {Et0 - Etn:.3e} ({drop:.2f}%)", prefix="")
-    except Exception:
-        pass
-
 
 def validators_enabled() -> bool:
     return is_enabled() and _PRINT_VALIDATORS
