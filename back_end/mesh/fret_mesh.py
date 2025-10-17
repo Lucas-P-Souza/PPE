@@ -288,7 +288,7 @@ def _discretizar_segmento(
 # ---------------------------------------------------------------------------
 #                    Génération complète de la maille
 # ---------------------------------------------------------------------------
-def gerar_malha_trastes(
+def generer_maille_frettes(
     escala_mm: float,
     total_trastes: int,
     dx_alvo_mm: float = 6.0,
@@ -452,7 +452,7 @@ def persist_into_config_file(config_path: str | Path, result: FretMeshResult) ->
 
 __all__ = [
     "calcular_trastes",
-    "gerar_malha_trastes",
+    "generer_maille_frettes",
     "inject_into_config",
     "save_fret_mesh_json",
     "load_fret_mesh_json",

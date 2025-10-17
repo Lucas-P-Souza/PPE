@@ -134,7 +134,7 @@ if __name__ == "__main__":
     injecter_dans_config = True     # Si True : applique FRET_* et override core dans config
 
     # Génération du résultat de maillage (structure FretMeshResult)
-    res = gerar_malha_trastes(
+    res = generer_maille_frettes(
         escala_total_mm,            # Longueur d'échelle totale mm
         total_trastes,              # Nombre de frettes
         dx_alvo_mm=dx_alvo_mm,      # Pas cible
