@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 # Imports com fallback para execução direta
 try:
     from digital_twin.back_end import config as _cfg  # type: ignore
-    from digital_twin.back_end.fem.solver import build_node_positions_from_config  # type: ignore
+    from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
     from digital_twin.back_end.fem.time_integration import fournisseur_force_localisee  # type: ignore
 except ModuleNotFoundError:
     import sys as _sys
@@ -26,7 +26,7 @@ except ModuleNotFoundError:
     if str(ROOT) not in _sys.path:
         _sys.path.insert(0, str(ROOT))
     from digital_twin.back_end import config as _cfg  # type: ignore
-    from digital_twin.back_end.fem.solver import build_node_positions_from_config  # type: ignore
+    from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
     from digital_twin.back_end.fem.time_integration import fournisseur_force_localisee  # type: ignore
 
 

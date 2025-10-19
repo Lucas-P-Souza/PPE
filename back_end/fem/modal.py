@@ -13,10 +13,11 @@ from __future__ import annotations
 import numpy as np
 
 
-def detect_constrained_dofs_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
-    """Détecte des DDL contraints par CL de Dirichlet selon la convention du projet :
-    - lignes/colonnes nulles hors diagonale ; diag=1.0 sur les DDL contraints.
-    Retourne un tableau d'indices contraints.
+def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
+    """Detecter des DDL contraints par conditions de Dirichlet selon la convention du projet.
+
+    Critère: lignes/colonnes ≈ 0 hors diagonale et diag ≈ 1 sur DDLs contraints.
+    Retourne um array de índices contraints (int).
     """
     n = M.shape[0]
     constrained = []
@@ -34,7 +35,7 @@ def detect_constrained_dofs_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12
     return np.asarray(constrained, dtype=int)
 
 
-def compute_modal_frequencies_and_modes(M: np.ndarray, K: np.ndarray, num_modes: int = 4):
+def calculer_frequences_et_modes(M: np.ndarray, K: np.ndarray, num_modes: int = 4):
     """Résout K v = λ M v sur les DDL libres et renvoie (freqs_hz, modes_full).
 
     Étapes:
@@ -49,7 +50,7 @@ def compute_modal_frequencies_and_modes(M: np.ndarray, K: np.ndarray, num_modes:
     if M.shape != K.shape or M.ndim != 2 or M.shape[0] != M.shape[1]:
         raise ValueError("M et K doivent être carrées et de même taille")
     n = M.shape[0]
-    constrained = detect_constrained_dofs_mk(M, K)
+    constrained = detecter_ddl_contraints_mk(M, K)
     free = np.setdiff1d(np.arange(n), constrained)
     if free.size == 0:
         raise ValueError("Aucun DDL libre détecté pour l'analyse modale")

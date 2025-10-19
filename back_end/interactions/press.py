@@ -37,8 +37,7 @@ try:
     from digital_twin.back_end.utils import debug as dbg  # type: ignore
 except Exception:  # pragma: no cover
     class _DbgNoOp:
-        @staticmethod
-        def is_enabled() -> bool: return False
+        ENABLED = False
         @staticmethod
         def dprint(*args, **kwargs): pass
     dbg = _DbgNoOp()  # type: ignore
@@ -329,12 +328,12 @@ if __name__ == "__main__":
 
     # Imports tardifs pour éviter des dépendances lourdes au chargement du module
     try:
-        from ..fem.formulation import build_global_mkc_from_config, rayleigh_damping  # type: ignore
+        from ..fem.formulation import build_global_mkc_from_config, amortissement_rayleigh  # type: ignore
         from .. import config  # type: ignore
     except Exception:
         # Fallback absolu si exécution directe hors package
         try:
-            from digital_twin.back_end.fem.formulation import build_global_mkc_from_config, rayleigh_damping  # type: ignore
+            from digital_twin.back_end.fem.formulation import build_global_mkc_from_config, amortissement_rayleigh  # type: ignore
             from digital_twin.back_end import config  # type: ignore
         except Exception as exc:
             print("[ERREUR] Impossible d'importer formulation/config:", exc)
@@ -356,7 +355,7 @@ if __name__ == "__main__":
     beta = float(meta.get('beta')) if 'beta' in meta else None    # type: ignore[assignment]
     if alpha is None or beta is None:
         # Sécurité: recalcul sur M/K contraints
-        alpha, beta, _, _ = rayleigh_damping(M, K, config.DAMPING_MODES_REF, config.DAMPING_ZETAS_REF)
+        alpha, beta, _, _ = amortissement_rayleigh(M, K, config.DAMPING_MODES_REF, config.DAMPING_ZETAS_REF)
 
     n = M.shape[0]
 

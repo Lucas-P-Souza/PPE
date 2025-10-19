@@ -123,24 +123,55 @@ if abs(_length_m_recon - L) / L > 0.01:
     print(f"[AVERTISSEMENT] Longueur reconstruite {_length_m_recon:.6f} m ≠ L={L:.6f} m (>1%).")
 # NOTE : Ceci est juste un avertissement, la simulation continue.
 
-# DX : valeur de référence Δx (m) pour diagnostics (si maille uniforme, sinon moyenne)
+# DX : valeur de référence Δx (m) pour diagnostics (valeur moyenne des frettes)
 DX: float = _length_m_recon / FRET_N_ELEMS if FRET_N_ELEMS else L
 # NOTE : DX n'affecte pas les calculs, il est juste utilisé pour des diagnostics.
 
-# ---------------------------------------------------------------------------
-# 3.1 Utilitaires pour gérer deux types de maillage (uniforme vs frettes)
-# ---------------------------------------------------------------------------
 # Pré-calculer la version en mètres des dx (mm -> m) pour éviter conversions répétées.
 # Remplaçant les petites fonctions d'accès (plus simples et plus direct).
 FRET_DXS_M: list[float] = [v / 1000.0 for v in FRET_DXS_MM] 
 
 # =============================================================
-# 4. CONDITIONS INITIALES (PINÇAGE)
+# 4. PPINCAGE (CONDITIONS INITIALES)
 # -------------------------------------------------------------
 # PLUCK_POS : Fraction de la longueur où la corde est pincée (0 < x < 1)
 # PLUCK_AMP : Amplitude initiale de pincement (m)
 PLUCK_POS: float = 0.7    # 0 < PLUCK_POS ≤ 1
 PLUCK_AMP: float = 0.003  # mm
+
+# =============================================================
+# 4.1. FORCE D'EXCITATION LOCALISÉE (corde pincée au temps)
+# -------------------------------------------------------------
+# Ces paramètres contrôlent l'enveloppe trapézoïdale utilisée par
+# time_integration.fournisseur_force_localisee. Le nœud d'application est
+# choisi à partir de PLUCK_POS (fraction de L), en prenant le nœud le plus proche.
+# EXCITATION_F_MAX  : amplitude maximale (Newtons)
+# EXCITATION_T_RISE : temps de montée (s)
+# EXCITATION_T_HOLD : temps de palier (s)
+# EXCITATION_T_DECAY: temps de décroissance (s)
+EXCITATION_F_MAX: float = 1.0           # Newts
+EXCITATION_T_RISE: float = 0.001        # s
+EXCITATION_T_HOLD: float = 0.001        # s
+EXCITATION_T_DECAY: float = 0.003       # s
+# NOTE : Ces paramètres définissent une force temporelle localisée appliquée
+
+# Deuxième excitation optionnelle (re-pincement) — temps de début (s)
+# - Si <= 0, aucune deuxième excitation n'est ajoutée.
+EXCITATION_SECOND_T0: float = 0
+
+# =============================================================
+# 5. PARAMÈTRES DE FORCE DE PRESSION (interaction externe)
+# -------------------------------------------------------------
+# Paramètres d'exemple/config par défaut (peuvent être substitués):
+# PRESS_NODE_INDEX: indice du nœud à presser (si None, usa ~0.3·(n_nodes-1))
+# PRESS_T_ON / PRESS_T_OFF: fenêtre de temps [s]
+# PRESS_KS: rigueur locale (N/m)
+# PRESS_CS: amortissement local supplémentaire (N·s/m). 0.0 → Rayleigh pur
+PRESS_NODE_INDEX: int | None = None
+PRESS_T_ON: float = 0.5                 # s
+PRESS_T_OFF: float = 8.0                # s
+PRESS_KS: float = 5e6                   # N/m
+PRESS_CS: float = 0.0                   # N·s/m
 
 # =============================================================
 # 5. PARAMÈTRES DE SORTIE/TRACE
@@ -187,20 +218,17 @@ SNAPSHOTS_SHOW_LEGEND = False    # True / False
 # Agora todas as flags de debug dependem apenas de DEBUG_ENABLED.
 DEBUG_ENABLED: bool = True
 
-# Apenas a variável canônica ON/OFF e os parâmetros numéricos permanecem.
-# Use `DEBUG_ENABLED` para ligar/desligar todos os comportamentos de debug.
-# Parâmetros numéricos relacionados a debug que continuam disponíveis:
-DEBUG_SOLVER_SAMPLES_TARGET: int = 12
-DEBUG_STEP_EVERY: int = 0
-
 # Interrupteurs pour activer/désactiver les sorties de fichiers (pour débogage terminal uniquement)
-# - OUTPUT_ENABLE_IMAGES : contrôle tous les PNG (modes, x(t), énergies, FFT, snapshots, frame t0)
-# - OUTPUT_ENABLE_GIFS   : contrôle l'animation GIF
-# - OUTPUT_ENABLE_CSV    : contrôle l'export CSV des déplacements
-# AVERTISSEMENT: Ces interrupteurs n'affectent pas le calcul (Newmark, M/K/C), uniquement les E/S.
+# OUTPUT_ENABLE_IMAGES : contrôle tous les PNG (modes, x(t), énergies, FFT, snapshots, frame t0)
+# OUTPUT_ENABLE_GIFS : contrôle l'animation GIF
+# OUTPUT_ENABLE_CSV : contrôle l'export CSV des déplacements
 OUTPUT_ENABLE_IMAGES: bool = True
 OUTPUT_ENABLE_GIFS: bool = True
 OUTPUT_ENABLE_CSV: bool = True
+# NOTE : Ces interrupteurs n'affectent pas le calcul (Newmark, M/K/C), uniquement les E/S.
+
+# Activer/désactiver l'utilisation d'événements de pression (simulate_with_press)
+PRESS_EVENTS_ENABLED: bool = True
 
 # =============================================================
 # 5.1. PARAMÈTRES DE FFT (consommés par solver)
@@ -252,25 +280,6 @@ ANIM_FPS_REAL: int = 30             # FPS du GIF « temps réel »
 ANIM_SLOW_DURATION_S: float | None = 60.0
 
 
-# =============================================================
-# 5.3. FORCE D'EXCITATION LOCALISÉE (corde pincée au temps)
-# -------------------------------------------------------------
-# Ces paramètres contrôlent l'enveloppe trapézoïdale utilisée par
-# time_integration.fournisseur_force_localisee. Le nœud d'application est
-# choisi à partir de PLUCK_POS (fraction de L), en prenant le nœud le plus proche.
-# - EXCITATION_F_MAX  : amplitude maximale (Newtons)
-# - EXCITATION_T_RISE : montée (s)
-# - EXCITATION_T_HOLD : palier (s)
-# - EXCITATION_T_DECAY: décroissance (s)
-EXCITATION_F_MAX: float = 1.0
-EXCITATION_T_RISE: float = 0.001
-EXCITATION_T_HOLD: float = 0.001
-EXCITATION_T_DECAY: float = 0.003
-
-# Deuxième excitation optionnelle (re-pincement) — temps de début (s)
-# - Si <= 0, aucune deuxième excitation n'est ajoutée.
-EXCITATION_SECOND_T0: float = 0
-
 # Extension automatique de la simulation « jusqu'à arrêt » (décroissance)
 # - Si True, la simulation est exécutée par tranches (CHUNK_SECONDS) jusqu'à
 #   ce que le déplacement et la vitesse restent sous des seuils pendant une
@@ -281,24 +290,6 @@ CHUNK_SECONDS: float = 0.5       # taille des tranches d'intégration
 STOP_WINDOW_SEC: float = 0.2     # fenêtre d'observation de fin (secondes)
 STOP_THRESH_U: float = 1e-6      # seuil déplacement (m)
 STOP_THRESH_V: float = 1e-4      # seuil vitesse (m/s)
-
-# =============================================================
-# 5.4. PRESS EVENTS (pression du doigt)
-# -------------------------------------------------------------
-# Activation des événements de pression de nœuds internes (ajoute K locale et C via Rayleigh)
-# Quand True, le main utilise simulate_with_press; quand False, flux normal.
-PRESS_EVENTS_ENABLED: bool = False
-
-# Paramètres d'exemple/config par défaut (peuvent être substitués):
-# - PRESS_NODE_INDEX: indice du nœud à presser (si None, usa ~0.3·(n_nodes-1))
-# - PRESS_T_ON / PRESS_T_OFF: janela de tempo [s]
-# - PRESS_KS: rigidez local (N/m)
-# - PRESS_CS: amortecimento local adicional (N·s/m). 0.0 → Rayleigh puro
-PRESS_NODE_INDEX: int | None = None
-PRESS_T_ON: float = 0.5
-PRESS_T_OFF: float = 8.0
-PRESS_KS: float = 5e6
-PRESS_CS: float = 0.0
 
 # =============================================================
 # 6. FONCTIONS AUXILIAIRES (optionnel)
@@ -312,29 +303,25 @@ def summary() -> str:
     if fret_dxs_m and len(fret_dxs_m) > 0:
         dx_info = f"Frettes: ~dx_min={min(fret_dxs_m):.6f} m, n_elems={FRET_N_ELEMS}"
     else:
-        dx_info = f"Uniforme DX={DX:.6f} m"
+        dx_info = f"DX moyen={DX:.6f} m (maille frettes)"
     # Valeurs effectives (si override core a été fait, N_NODES reflète déjà la maille frettes)
     n_nodes_effectif = FRET_N_NODES
     n_elems_effectif = FRET_N_ELEMS
     dx_min_fret = (min(FRET_DXS_M) if len(FRET_DXS_M) > 0 else DX)
     return (
         "Résumé de la simulation:\n"
-        f"  Longueur L               = {L:.4f} m\n"
-        f"  Tension T                = {T:.4f} N\n"
-        f"  Densité linéique μ       = {MU:.6f} kg/m\n"
-        f"  Vitesse d'onde c         = {WAVE_SPEED:.2f} m/s\n"
-        f"  f1 idéale                = {FUNDAMENTAL_FREQ_IDEAL:.2f} Hz\n"
-        #f"  Rayleigh alpha           = {ALPHA} \n"
-        #f"  Rayleigh beta            = {BETA} \n"
-        f"  Mode maille frettes      = {fret_mode}\n"
-        f"  Info maille              = {dx_info}\n"
-        f"  Nº nœuds effectif        = {n_nodes_effectif}\n"
-        f"  Nº éléments effectif     = {n_elems_effectif}\n"
-        f"  Δx min (effectif)        = {dx_min_fret:.6f} m\n"
-    # f"  Δt                       = {DT:.2e} s\n"  # Parâmetro removido
-        f"  Position pincement frac  = {PLUCK_POS:.2f}\n"
-        f"  Amplitude pincement      = {PLUCK_AMP:.4f} m\n"
-        f"  Nœud de sortie           = {OUTPUT_NODE}\n"
+        f"- Longueur corde L = {L:.6f} m\n"
+        f"- Densité linéique MU = {MU:.6f} kg/m\n"
+        f"- Tension T = {T:.2f} N\n"
+        f"- Vitesse onde c = {WAVE_SPEED:.2f} m/s\n"
+        f"- Fréquence fondamentale idéale f1 = {FUNDAMENTAL_FREQ_IDEAL:.2f} Hz\n"
+        f"- Amortissement Rayleigh activé: {DAMPING_MODES_REF} avec ζ = {DAMPING_ZETAS_REF}\n"
+        f"- Maille: {dx_info}\n"
+        f"- Nœuds effectifs: {n_nodes_effectif}, Éléments effectifs: {n_elems_effectif}\n"
+        f"- DX min frettes = {dx_min_fret:.6f} m\n"
+        f"- Condition initiale: pincement à {PLUCK_POS*L:.3f} m avec amplitude {PLUCK_AMP:.6f} m\n"
+        f"- Nœud de sortie: {OUTPUT_NODE}\n"
+        f"- Debug activé: {DEBUG_ENABLED}\n"
     )
 
 if __name__ == "__main__":

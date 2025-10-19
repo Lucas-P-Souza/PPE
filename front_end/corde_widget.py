@@ -49,7 +49,7 @@ class CordeWidget(QWidget):
         # --- géométrie issue du back-end (config) ---
         # Nous construisons la discrétisation normalisée [0..1] directement à partir de
         # digital_twin.back_end.config.FRET_NODE_POSITIONS_MM (cumule) et FRET_DXS_MM.
-        # Si indisponible, nous retombons sur une échelle uniforme simple.
+    # Si indisponible, nous retombons sur une échelle à pas réguliers (fallback simple).
         self._node_fracs = [0.0]
         self._have_backend_geom = False
         self._total_length_m = 1.0
@@ -63,7 +63,7 @@ class CordeWidget(QWidget):
                 self._have_backend_geom = True
                 self._total_length_m = total_m
         except Exception:
-            self._node_fracs = [i / 100.0 for i in range(101)]  # fallback uniforme 100 divisions
+            self._node_fracs = [i / 100.0 for i in range(101)]  # fallback à pas réguliers (100 divisions)
             self._have_backend_geom = False
             self._total_length_m = 1.0
 

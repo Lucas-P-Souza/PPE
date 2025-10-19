@@ -18,16 +18,14 @@ try:
         calculer_energies_dans_le_temps,
     )
     # Importer depuis les nouveaux modules organisés
-    from digital_twin.back_end.fem.solver import build_node_positions_from_config  # type: ignore
-    from digital_twin.back_end.fem.modal import compute_modal_frequencies_and_modes  # type: ignore
-    from digital_twin.back_end.analysis.fft import tracer_fft_png, tracer_fft_logdb_remplie  # type: ignore
-    from digital_twin.back_end.analysis.spectrogram import plot_spectrogram  # type: ignore
-    from digital_twin.back_end.viz.plots import plot_first_modes, plot_snapshots_png, save_string_frame_png  # type: ignore
-    from digital_twin.back_end.viz.anim import animate_string_motion  # type: ignore
-    from digital_twin.back_end.io.exports import save_displacement_csv  # type: ignore
+    from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
+    from digital_twin.back_end.fem.modal import calculer_frequences_et_modes  # type: ignore
+    # heavy plotting/fft imports moved to post-processing (SECTION 6) to
+    # avoid importing SciPy/matplotlib during simulation startup
+    from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
     # Pression (appui de note) et intégration segmentée
     from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
-    from digital_twin.back_end.fem.formulation import rayleigh_damping  # type: ignore
+    from digital_twin.back_end.fem.formulation import amortissement_rayleigh  # type: ignore
 except ModuleNotFoundError:
     # Solution de repli lors de l'exécution autonome (ajoute la racine du workspace au sys.path)
     import sys as _sys
@@ -47,15 +45,13 @@ except ModuleNotFoundError:
         integrer_newmark_beta,
         calculer_energies_dans_le_temps,
     )
-    from digital_twin.back_end.fem.solver import build_node_positions_from_config  # type: ignore
-    from digital_twin.back_end.fem.modal import compute_modal_frequencies_and_modes  # type: ignore
-    from digital_twin.back_end.analysis.fft import tracer_fft_png, tracer_fft_logdb_remplie  # type: ignore
-    from digital_twin.back_end.analysis.spectrogram import plot_spectrogram  # type: ignore
-    from digital_twin.back_end.viz.plots import plot_first_modes, plot_snapshots_png, save_string_frame_png  # type: ignore
-    from digital_twin.back_end.viz.anim import animate_string_motion  # type: ignore
-    from digital_twin.back_end.io.exports import save_displacement_csv  # type: ignore
+    from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
+    from digital_twin.back_end.fem.modal import calculer_frequences_et_modes  # type: ignore
+    # heavy plotting/fft imports moved to post-processing (SECTION 6) to
+    # avoid importing SciPy/matplotlib during simulation startup
+    from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
     from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
-    from digital_twin.back_end.fem.formulation import rayleigh_damping  # type: ignore
+    from digital_twin.back_end.fem.formulation import amortissement_rayleigh  # type: ignore
 
 
 def main() -> None:
@@ -120,7 +116,7 @@ def main() -> None:
     # Analyse modale
     n = M.shape[0]
     x_coords = build_node_positions_from_config(n)
-    freqs_hz, modes_full = compute_modal_frequencies_and_modes(M, K, num_modes=4)
+    freqs_hz, modes_full = calculer_frequences_et_modes(M, K, num_modes=4)
     print("Premières fréquences (Hz):", np.round(freqs_hz, 3))
 
     # ==============================================
@@ -183,14 +179,45 @@ def main() -> None:
         try:
             modes_ref = getattr(_cfg, "DAMPING_MODES_REF")
             zetas_ref = getattr(_cfg, "DAMPING_ZETAS_REF")
-            alpha, beta, _, _ = rayleigh_damping(M, K, modes_ref, zetas_ref)
+            alpha, beta, _, _ = amortissement_rayleigh(M, K, modes_ref, zetas_ref)
         except Exception as _e_rb:  # pragma: no cover
             raise RuntimeError("Impossible de déterminer α et β (Rayleigh) pour la simulation avec pression") from _e_rb
 
-    # Intégration unique sur [0, T_total] avec évènement de pression et deux pincements (F_total)
-    t_vec, U_hist, V_hist, A_hist = simulate_with_press(
-        M, K, alpha, beta, F_total, delta_t, press_events, T_total, U0=U0, V0=V0_zero
-    )
+        # --- Sanity-check des PressEvent: garantir indices valides et pas de nœuds d'extrémité ---
+        valid_press_events: list[PressEvent] = []
+        for ev in press_events:
+            if not isinstance(ev.node, int):
+                print(f"[WARN] PressEvent ignoré: node non int ({ev.node})")
+                continue
+            if ev.node <= 0 or ev.node >= (M.shape[0] - 1):
+                # interdit d'appuyer sur nœuds d'extrémité (Dirichlet)
+                print(f"[WARN] PressEvent ignoré: node {ev.node} est extrême ou hors-limites (n={M.shape[0]})")
+                continue
+            # valider aussi t_on < t_off
+            if ev.t_off <= ev.t_on:
+                print(f"[WARN] PressEvent ignoré: t_off <= t_on pour node {ev.node}")
+                continue
+            valid_press_events.append(ev)
+
+        if not valid_press_events and bool(getattr(_cfg, "PRESS_EVENTS_ENABLED", False)):
+            print("[INFO] Aucun PressEvent valide — désactivation des événements de pression")
+            # proceed without press events
+            press_events = []
+        else:
+            press_events = valid_press_events
+
+    # Choix du flux d'intégration selon la configuration: avec ou sans événements de pression
+    if bool(getattr(_cfg, "PRESS_EVENTS_ENABLED", False)):
+        print("[INFO] PRESS_EVENTS_ENABLED=True → simulation with press events (simulate_with_press)")
+        t_vec, U_hist, V_hist, A_hist = simulate_with_press(
+            M, K, alpha, beta, F_total, delta_t, press_events, T_total, U0=U0, V0=V0_zero
+        )
+    else:
+        # Flux normal: intégration unique avec la force résultante F_total (fonction F(t,k))
+        print("[INFO] PRESS_EVENTS_ENABLED=False → normal simulation (integrer_newmark_beta)")
+        t_vec, U_hist, V_hist, A_hist = integrer_newmark_beta(
+            M, C, K, F_total, delta_t, T_total, U0=U0, V0=V0_zero
+        )
 
     # ==============================================
     # SECTION 6 — POST-TRAITEMENT : enregistrer CSV, générer PLOTS, FFT, GIFs
@@ -202,10 +229,17 @@ def main() -> None:
     if bool(getattr(_cfg, "OUTPUT_ENABLE_CSV", True)):
         plots_dir.mkdir(parents=True, exist_ok=True)
         csv_path = plots_dir / "string_positions.csv"
-        save_displacement_csv(t_vec, U_hist, str(csv_path))
+        # write CSV using the I/O package (lightweight)
+        enregistrer_deplacement_csv(t_vec, U_hist, str(csv_path))
 
-    # 6.2) PLOTS — Modes (utilise le résultat de l'analyse modale déjà calculée)
+    # 6.2) PLOTS — Modes and other heavy post-processing
     if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):
+        # import heavy plotting/fft modules lazily to avoid large imports during simulation
+        from digital_twin.back_end.viz.plots import plot_first_modes, plot_snapshots_png, save_string_frame_png  # type: ignore
+        from digital_twin.back_end.analysis.fft import tracer_fft_png, tracer_fft_logdb_remplie  # type: ignore
+        from digital_twin.back_end.analysis.spectrogram import plot_spectrogram  # type: ignore
+        from digital_twin.back_end.viz.anim import animate_string_motion  # type: ignore
+
         plots_dir.mkdir(parents=True, exist_ok=True)
         plot_first_modes(x_coords, modes_full, freqs_hz, max_modes=4, savepath=str(plots_dir / "modes_first4.png"))
 

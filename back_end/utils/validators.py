@@ -15,8 +15,7 @@ except Exception:
         from digital_twin.back_end.utils import debug as dbg  # type: ignore
     except Exception:
         class _DbgNoOp:
-            @staticmethod
-            def is_enabled() -> bool: return False
+            ENABLED = False
             @staticmethod
             def dprint(*args, **kwargs): pass
         dbg = _DbgNoOp()  # type: ignore

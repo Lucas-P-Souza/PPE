@@ -2,8 +2,8 @@
 Intégration temporelle et conditions initiales pour la corde vibrante (FEM).
 
 Ce module regroupe UNIQUEMENT l'API canonique en français:
- - l'intégrateur de Newmark-beta (β=1/4, γ=1/2, stable inconditionnel pour systèmes linéaires),
- - les conditions initiales (pincement triangulaire) et un calcul du premier pas (diagnostic),
+    - l'intégrateur de Newmark-beta (β=1/4, γ=1/2, stable inconditionnel pour systèmes linéaires),
+    - les conditions initiales (pincement triangulaire) et un calcul du premier pas (diagnostic),
  - les paramètres de simulation et le calcul d'énergies au cours du temps,
  - un fournisseur de force nulle (F(t) ≡ 0).
 
@@ -22,33 +22,46 @@ except Exception:
         from digital_twin.back_end.utils import debug as dbg  # type: ignore
     except Exception:
         class _DbgNoOp:
+            # provide attribute-based API compatibility
+            ENABLED = False
+            # legacy per-print flags removed; rely on ENABLED
+
             @staticmethod
-            def is_enabled() -> bool: return False
-            @staticmethod
-            def dprint(*args, **kwargs): pass
+            def dprint(*args, **kwargs):
+                pass
+
             @staticmethod
             def get_solver_sample_interval(n_steps: int) -> int:
                 try:
                     return max(1, int(round(n_steps / 50)))
                 except Exception:
                     return 100
+
             @staticmethod
-            def print_solver_setup_summary(*args, **kwargs): pass
+            def print_solver_setup_summary(*args, **kwargs):
+                pass
+
             @staticmethod
-            def print_newmark_constants(*args, **kwargs): pass
+            def print_newmark_constants(*args, **kwargs):
+                pass
+
             @staticmethod
-            def print_step_snapshot(*args, **kwargs): pass
+            def print_step_snapshot(*args, **kwargs):
+                pass
+
             @staticmethod
-            def print_energy_start_end(*args, **kwargs): pass
+            def print_energy_start_end(*args, **kwargs):
+                pass
+
         dbg = _DbgNoOp()  # type: ignore
 
 
 # Détection des GL (DDLs) contraints (import depuis fem.modal)
 try:
-    from .modal import detect_constrained_dofs_mk  # type: ignore
+    from .modal import detecter_ddl_contraints_mk  # type: ignore
 except Exception:
     # Fallback local minimal si l'import échoue (devrait rarement arriver)
-    def detect_constrained_dofs_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
+    def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
         """Détecte les DDLs contraints de type Dirichlet selon la convention du projet.
         Critère utilisé: lignes/colonnes ≈ 0 hors diagonale et diag ≈ 1 aux extrémités.
         """
@@ -89,7 +102,7 @@ def definir_parametres_simulation(delta_t: float, T_total: float):
     n_pas = int(round(T_total / delta_t))
     inv_dt_carre = 1.0 / (delta_t * delta_t)
     inv_2dt = 1.0 / (2.0 * delta_t)
-    if dbg.is_enabled():
+    if getattr(dbg, 'ENABLED', False):
         dbg.dprint(f"n_pas = {n_pas}")
     return delta_t, T_total, n_pas, inv_dt_carre, inv_2dt
 
@@ -107,7 +120,7 @@ def initialiser_u0_triangle(M: np.ndarray, *, L: float, h: float, x_p: float) ->
     - U0: vecteur (N,) des déplacements initiaux.
 
     Détails et formules:
-    - Discrétisation uniforme implicite via N points: Δx = L/(N-1), x_i = i·Δx
+    - Discrétisation régulière implicite via N points: Δx = L/(N-1), x_i = i·Δx
     - U0(x) = h·(x/x_p) pour x ≤ x_p ; U0(x) = h·((L - x)/(L - x_p)) pour x > x_p
     """
     N = int(M.shape[0])
@@ -175,7 +188,7 @@ def calculer_u1(M: np.ndarray, C: np.ndarray, K: np.ndarray,
     rhs = (2.0 * M * inv_dt2) @ U_n - ((M * inv_dt2) - (C * inv_2dt)) @ U_nm1
     # np.linalg.solve: résout A·x = rhs (système linéaire)
     U1 = np.linalg.solve(A, rhs)
-    if dbg.is_enabled():
+    if getattr(dbg, 'ENABLED', False):
         dbg.dprint(f"U1: shape={U1.shape}, max={np.nanmax(U1):.3e}, min={np.nanmin(U1):.3e}")
     return U1
 
@@ -323,7 +336,7 @@ def integrer_newmark_beta(
     n_steps = int(np.floor(t_max / dt)) + 1
     t = np.linspace(0.0, dt * (n_steps - 1), n_steps)
 
-    constrained = detect_constrained_dofs_mk(M, K)
+    constrained = detecter_ddl_contraints_mk(M, K)
     free = np.setdiff1d(np.arange(n), constrained)
     if free.size == 0:
         raise ValueError("Nenhum GL livre detectado para integração Newmark")
@@ -353,7 +366,7 @@ def integrer_newmark_beta(
     a4 = gamma / beta - 1.0
     a5 = dt * (gamma / (2.0 * beta) - 1.0)
 
-    if getattr(dbg, "is_verbose", None) and dbg.is_verbose():
+    if getattr(dbg, "ENABLED", False):
         try:
             dbg.print_newmark_constants(dt=dt, beta=beta, gamma=gamma, a0=a0, a1=a1, a2=a2, a3=a3, a4=a4, a5=a5)
         except Exception:
@@ -412,7 +425,7 @@ def integrer_newmark_beta(
             A[constrained, k + 1] = 0.0
 
         should_print = False
-        if dbg.is_enabled():
+        if getattr(dbg, 'ENABLED', False):
             if fixed_every and ((k + 1) % fixed_every == 0 or k == 0):
                 should_print = True
             elif ((k + 1) % sample == 0 or k == 0):
@@ -423,7 +436,7 @@ def integrer_newmark_beta(
             except Exception:
                 pass
 
-    if dbg.is_enabled():
+    if getattr(dbg, 'ENABLED', False):
         try:
             Ek, Ep, Et = calculer_energies_dans_le_temps(M, K, U, V)
             dbg.print_energy_start_end(t0=t[0], tn=t[-1], Ek0=Ek[0], Ep0=Ep[0], Et0=Et[0], Ekn=Ek[-1], Epn=Ep[-1], Etn=Et[-1])

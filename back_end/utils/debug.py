@@ -13,7 +13,7 @@
 # Usage
 # from digital_twin.back_end.utils import debug as dbg
 # dbg.dprint("quelque chose…")
-# if dbg.is_enabled():
+# if dbg.ENABLED:
 #     dbg.matrix_stats("M", M)
 #
 # Formatage paresseux (aucun coût si le debug est OFF) :
@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 _ENABLED: bool = False
 _PRINT_STEPS: bool = True
+_PRINT_STEP_ENERGY: bool = False
 _SOLVER_SAMPLES_TARGET: int = 12
 _PRINT_RAYLEIGH_SUMMARY: bool = True
 _PRINT_RAYLEIGH_DETAILS: bool = False
@@ -34,40 +35,47 @@ _FIXED_STEP_EVERY: int = 0
 # Initialisation depuis le module config si disponible
 try:  # pragma: no cover - best-effort import
     from .. import config as _cfg  # type: ignore
-    # Prefer explicit DEBUG_ENABLED; fallback to DEBUG_RAYLEIGH if present for older configs.
-    _ENABLED = bool(getattr(_cfg, "DEBUG_ENABLED", getattr(_cfg, "DEBUG_RAYLEIGH", _ENABLED)))
-    _PRINT_STEPS = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
-    _PRINT_STEP_ENERGY = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED)) and bool(getattr(_cfg, "DEBUG_PRINT_STEP_ENERGY", False))
+    # Only read the canonical DEBUG_ENABLED flag from config. All per-print
+    # flags are derived from this single switch to keep the API simple.
+    _ENABLED = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
+    # Derive all print flags from the single _ENABLED value
+    _PRINT_STEPS = bool(_ENABLED)
+    _PRINT_STEP_ENERGY = bool(_ENABLED)
+    _PRINT_RAYLEIGH_SUMMARY = bool(_ENABLED)
+    _PRINT_RAYLEIGH_DETAILS = bool(_ENABLED)
+    _PRINT_VALIDATORS = bool(_ENABLED)
+    # Numeric debug parameters are still honored if present
     _SOLVER_SAMPLES_TARGET = int(getattr(_cfg, "DEBUG_SOLVER_SAMPLES_TARGET", _SOLVER_SAMPLES_TARGET) or _SOLVER_SAMPLES_TARGET)
-    _PRINT_RAYLEIGH_SUMMARY = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
-    _PRINT_RAYLEIGH_DETAILS = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED)) and bool(getattr(_cfg, "DEBUG_PRINT_RAYLEIGH_DETAILS", False))
-    _PRINT_VALIDATORS = bool(getattr(_cfg, "DEBUG_ENABLED", _ENABLED))
     _FIXED_STEP_EVERY = int(getattr(_cfg, "DEBUG_STEP_EVERY", _FIXED_STEP_EVERY) or _FIXED_STEP_EVERY)
 except Exception:
     # Conserver la valeur False par défaut si l'import de config échoue
     _ENABLED = False
     _FIXED_STEP_EVERY = 0
 
+# Public boolean exported for callers that prefer direct checks instead of functions
+ENABLED: bool = bool(_ENABLED)
+
 
 def set_enabled(value: bool) -> None:
     # Active/Désactive les impressions de débogage à l'exécution.
     global _ENABLED
     _ENABLED = bool(value)
+    # keep exported flags in sync
+    global ENABLED, _PRINT_STEPS, _PRINT_STEP_ENERGY, _PRINT_RAYLEIGH_SUMMARY, _PRINT_RAYLEIGH_DETAILS, _PRINT_VALIDATORS
+    ENABLED = bool(_ENABLED)
+    # derive all per-print flags from the single enabled switch
+    _PRINT_STEPS = bool(_ENABLED)
+    _PRINT_STEP_ENERGY = bool(_ENABLED)
+    _PRINT_RAYLEIGH_SUMMARY = bool(_ENABLED)
+    _PRINT_RAYLEIGH_DETAILS = bool(_ENABLED)
+    _PRINT_VALIDATORS = bool(_ENABLED)
+    # Note: legacy multi-level debug flags were removed; use ENABLED and the
+    # per-print flags (e.g. _PRINT_RAYLEIGH_SUMMARY) instead.
 
 
-def is_enabled() -> bool:
-    # Retourne l'état actuel d'activation du débogage.
-    return bool(_ENABLED)
-
-
-def is_concise() -> bool:
-    # Concise mode folded into simple ON/OFF: when debug is enabled, concise prints are allowed.
-    return bool(_ENABLED)
-
-
-def is_verbose() -> bool:
-    # Verbose mode folded into simple ON/OFF: verbose prints are allowed when debug is enabled.
-    return bool(_ENABLED)
+# Deprecated runtime helpers removed: prefer reading `ENABLED`.
+# NOTE: compatibility wrapper functions removed. Callers should use
+# the exported `ENABLED` attribute directly.
 
 
 def dprint(*args: Any, prefix: str = "[DEBUG] ", sep: str = " ", end: str = "\n") -> None:
@@ -122,8 +130,8 @@ def print_rayleigh_explained(
     print_once: bool = True,
 ) -> None:
     # Bloc d'explication détaillé pour l'amortissement de Rayleigh (centré ici).
-    # Imprime une seule fois par défaut (print_once=True). Protégé par is_enabled().
-    if not is_enabled():
+    # Imprime une seule fois par défaut (print_once=True). Protégé par `ENABLED`.
+    if not ENABLED:
         return
     try:
         import numpy as np
@@ -192,10 +200,10 @@ def print_rayleigh_explained(
         if print_once and not _should_print_once("rayleigh_explained"):
             return
         # Print detailed only if explicitly requested
-        if _PRINT_RAYLEIGH_DETAILS or is_verbose():
+        if _PRINT_RAYLEIGH_DETAILS or ENABLED:
             dlazy(_make_msg, prefix="")
-        elif _PRINT_RAYLEIGH_SUMMARY or is_concise():
-            # concise one-liner
+        elif _PRINT_RAYLEIGH_SUMMARY or ENABLED:
+            # summary one-liner
             try:
                 two_pi = 2.0 * __import__("numpy").pi
                 f_hz = __import__("numpy").asarray(omegas, dtype=float) / two_pi
@@ -321,7 +329,7 @@ def print_local_element_matrices(
     limit: int | None = None,
 ) -> None:
     # Impression protégée des matrices élémentaires locales (non uniforme uniquement).
-    if not is_enabled():
+    if not ENABLED:
         return
     import numpy as np
     data = compute_local_element_matrices(tension=tension, lin_density=lin_density, dx_vector=dx_vector)
@@ -352,8 +360,8 @@ def print_formulation_diagnostics(
     config: Any | None = None,
 ) -> None:
     # Diagnostics complets auparavant imprimés dans formulation.__main__.
-    # Toutes les impressions sont protégées par dbg.is_enabled(). Utilise NumPy pour normes/VP/formatage.
-    if not is_enabled():
+    # Toutes les impressions sont protégées par dbg.ENABLED. Utilise NumPy pour normes/VP/formatage.
+    if not ENABLED:
         return
     import numpy as np
     _np = np
@@ -519,7 +527,7 @@ def get_fixed_step_interval() -> int:
 
 def print_solver_setup_summary(M, C, K, *, dt: float, t_max: float, n_steps: int, constrained_idxs: list[int] | Any) -> None:
     # Résumé des tailles, DOF libres/contraints, pas de temps et normes.
-    if not is_enabled():
+    if not ENABLED:
         return
     try:
         import numpy as np
@@ -543,21 +551,9 @@ def print_solver_setup_summary(M, C, K, *, dt: float, t_max: float, n_steps: int
     except Exception:
         pass
 
-
-def print_newmark_constants(*, dt: float, beta: float, gamma: float, a0: float, a1: float, a2: float, a3: float, a4: float, a5: float) -> None:
-    # Affiche les coefficients Newmark utilisés.
-    if not is_enabled():
-        return
-    try:
-        dprint("[SOLVER] Newmark (β, γ) et constantes:", prefix="")
-        dprint(f"  β={beta:.6g}, γ={gamma:.6g}, dt={dt:.6e}s", prefix="")
-        dprint(f"  a0={a0:.3e}, a1={a1:.3e}, a2={a2:.3e}, a3={a3:.3e}, a4={a4:.3e}, a5={a5:.3e}", prefix="")
-    except Exception:
-        pass
-
 def validators_enabled() -> bool:
-    return is_enabled() and _PRINT_VALIDATORS
+    return ENABLED and _PRINT_VALIDATORS
 
 
 def rayleigh_summary_enabled() -> bool:
-    return is_enabled() and (_PRINT_RAYLEIGH_SUMMARY or is_concise())
+    return ENABLED and _PRINT_RAYLEIGH_SUMMARY
