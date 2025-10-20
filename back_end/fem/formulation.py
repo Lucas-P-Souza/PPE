@@ -31,39 +31,7 @@ from typing import Sequence, Tuple, Dict, Any
 import warnings
 import numpy as np
 
-try:
-    # Preferred: package-relative import
-    from ..utils import debug as dbg  # type: ignore
-except Exception:
-    # Try absolute import; if it fails, add project root to sys.path and retry
-    try:
-        from digital_twin.back_end.utils import debug as dbg  # type: ignore
-    except Exception:
-        try:
-            import sys
-            from pathlib import Path
-            ROOT = Path(__file__).resolve().parents[3]  # repo root containing 'digital_twin'
-            if str(ROOT) not in sys.path:
-                sys.path.insert(0, str(ROOT))
-            from digital_twin.back_end.utils import debug as dbg  # type: ignore
-        except Exception:
-            # Fallback no-op shim to avoid crashes during direct execution
-            class _DbgNoOp:
-                ENABLED = False
-
-                @staticmethod
-                def dprint(*args, **kwargs): pass
-                @staticmethod
-                def section(*args, **kwargs): pass
-                @staticmethod
-                def matrix_stats(*args, **kwargs): pass
-                @staticmethod
-                def print_blocks(*args, **kwargs): pass
-                @staticmethod
-                def bc_edge_sums(*args, **kwargs): pass
-                @staticmethod
-                def print_formulation_diagnostics(*args, **kwargs): pass
-            dbg = _DbgNoOp()  # type: ignore
+from ..utils import debug as dbg  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Surface publique stable
@@ -360,16 +328,11 @@ def build_global_mkc_from_config(apply_fixed_bc: bool = False, return_meta: bool
             # Absolute import fallback
             from digital_twin.back_end import config  # type: ignore
         except Exception:
-            # Fallback: add project root to sys.path and try again
-            try:
-                import sys
-                from pathlib import Path
-                ROOT = Path(__file__).resolve().parents[3]
-                if str(ROOT) not in sys.path:
-                    sys.path.insert(0, str(ROOT))
-                from digital_twin.back_end import config  # type: ignore
-            except Exception as exc:  # pragma: no cover
-                raise RuntimeError("Impossible d'importer le module config dans build_global_mkc_from_config") from exc
+                # Prefer explicit absolute import; if unavailable, raise to signal incorrect execution context
+                try:
+                    from digital_twin.back_end import config  # type: ignore
+                except Exception as exc:  # pragma: no cover
+                    raise RuntimeError("Impossible d'importer le module config dans build_global_mkc_from_config") from exc
             
     # Récupération du vecteur de dx (en m) depuis config
     dxs_m = getattr(config, "FRET_DXS_M", None)
@@ -472,11 +435,6 @@ if __name__ == "__main__":  # Petit banc d'essai (silencieux se debug desligado)
     try:
         from .. import config  # type: ignore
     except Exception:
-        this_file = Path(__file__).resolve()
-        back_end_dir = this_file.parent.parent
-        root = back_end_dir.parent.parent
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
         from digital_twin.back_end import config  # type: ignore
 
     # Détection du mode (présence FRET_DXS_MM) pour test

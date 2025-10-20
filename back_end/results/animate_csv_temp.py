@@ -40,9 +40,6 @@ def _robust_ylim(U: np.ndarray, q: float = 99.0) -> tuple[float, float]:
 
 def _x_positions_from_config(n_nodes: int) -> Optional[np.ndarray]:
     try:
-        ROOT = Path(__file__).resolve().parents[3]
-        if str(ROOT) not in sys.path:
-            sys.path.insert(0, str(ROOT))
         from digital_twin.back_end import config as _cfg  # type: ignore
     except Exception:
         return None
@@ -125,7 +122,7 @@ if __name__ == "__main__":
     res_dir = Path(__file__).resolve().parent
     csv = Path(sys.argv[1]) if len(sys.argv) > 1 else _find_latest_csv(res_dir)
     if csv is None or not csv.exists():
-        print("[ERREUR] CSV introuvable. Générez d'abord la simulation.")
+        print("[ERREUR] CSV introuvable. Veuillez d'abord exécuter la simulation pour générer les données.")
         sys.exit(1)
     gif_path = animate_csv(csv)
-    print("[OK] GIF enregistré dans:", gif_path)
+    print("[OK] GIF enregistré dans :", gif_path)

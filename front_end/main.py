@@ -1,13 +1,8 @@
 import sys
 import os
-# Ensure repository root is on sys.path so 'digital_twin' package can be imported
-# We need the parent directory that contains the 'digital_twin' package on sys.path
-_here = os.path.dirname(os.path.abspath(__file__))
-_repo_root = os.path.dirname(os.path.dirname(_here))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
+
 from PyQt5.QtWidgets import QApplication
-from gui import MainWindow
+from digital_twin.front_end.gui import MainWindow
 
 class AudioManager:
     def play_note(self, note_name):

@@ -62,8 +62,8 @@ def profil_polynomial_symetrique(t, t_debut, t_montee, t_plateau, k_max):
 
 def demonstration_profil_polynomial_K0():
     """Démonstration du profil polynomial avec K_total = K0 + k_virtuel(t)."""
-    print("Démonstration Profil Polynomial avec K0")
-    print("="*50)
+    print("Démonstration : profil polynomial avec K0")
+    print("=" * 50)
     
     # Simulation d'un système FEM simple
     K0 = 1800.0  # Raideur structurelle de base (N/m)
@@ -160,8 +160,8 @@ def demonstration_profil_polynomial_K0():
 
 def main():
     """Fonction principale de test."""
-    print("Test du Profil Polynomial avec K0")
-    print("="*50)
+    print("Test du profil polynomial avec K0")
+    print("=" * 50)
     
     try:
         # Test du profil polynomial avec K0

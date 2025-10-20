@@ -3,107 +3,65 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 
+# Try package imports first; if running the script directly (no package on sys.path),
+# add the repository root to sys.path once and re-run the imports. This keeps
+# in-repo direct execution working while avoiding pervasive sys.path shims.
 try:
     from digital_twin.back_end import config as _cfg  # type: ignore
-    from digital_twin.back_end.fem.formulation import build_global_mkc_from_config  # type: ignore
+    from digital_twin.back_end.fem.formulation import (
+        build_global_mkc_from_config,
+        build_node_positions_from_config,
+        amortissement_rayleigh,
+    )  # type: ignore
     from digital_twin.back_end.utils.validators import valider_mck  # type: ignore
-    from digital_twin.back_end.fem.time_integration import (  # type: ignore
+    from digital_twin.back_end.fem.time_integration import (
         definir_parametres_simulation,
         calculer_u1,
         fournisseur_force_localisee,
         somme_de_forces,
         integrer_newmark_beta,
         calculer_energies_dans_le_temps,
-    )
-    # Importer depuis les nouveaux modules organisés
-    from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
-    # heavy plotting/fft imports moved to post-processing (SECTION 6) to
-    # avoid importing SciPy/matplotlib during simulation startup
+    )  # type: ignore
+    from digital_twin.back_end.fem.modal import (
+        detecter_ddl_contraints_mk,
+        calculer_frequences_et_modes,
+    )  # type: ignore
     from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
-    # Pression (appui de note) et intégration segmentée
     from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
-    from digital_twin.back_end.fem.formulation import amortissement_rayleigh  # type: ignore
+    from digital_twin.back_end.audio.generate_audio_from_positions import generate_multiple_positions_audio
 except ModuleNotFoundError:
-    # Solution de repli lors de l'exécution autonome (ajoute la racine du workspace au sys.path)
+    # Running module as script from within the package folder (e.g. cwd==digital_twin)
+    # — add repo root (two levels up) to sys.path and import again.
     import sys as _sys
     ROOT = Path(__file__).resolve().parents[2]
     if str(ROOT) not in _sys.path:
         _sys.path.insert(0, str(ROOT))
     from digital_twin.back_end import config as _cfg  # type: ignore
-    from digital_twin.back_end.fem.formulation import build_global_mkc_from_config  # type: ignore
+    from digital_twin.back_end.fem.formulation import (
+        build_global_mkc_from_config,
+        build_node_positions_from_config,
+        amortissement_rayleigh,
+    )  # type: ignore
     from digital_twin.back_end.utils.validators import valider_mck  # type: ignore
-    from digital_twin.back_end.fem.time_integration import (  # type: ignore
+    from digital_twin.back_end.fem.time_integration import (
         definir_parametres_simulation,
         calculer_u1,
         fournisseur_force_localisee,
         somme_de_forces,
         integrer_newmark_beta,
         calculer_energies_dans_le_temps,
-    )
-    from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
-    # heavy plotting/fft imports moved to post-processing (SECTION 6) to
-    # avoid importing SciPy/matplotlib during simulation startup
+    )  # type: ignore
+    from digital_twin.back_end.fem.modal import (
+        detecter_ddl_contraints_mk,
+        calculer_frequences_et_modes,
+    )  # type: ignore
     from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
     from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
-    from digital_twin.back_end.fem.formulation import amortissement_rayleigh  # type: ignore
+    from digital_twin.back_end.audio.generate_audio_from_positions import generate_multiple_positions_audio
 
 
 def main() -> None:
     ROOT = Path(__file__).resolve().parents[2]
-
-    # Implémentation inlinée de fonctions modales (migrées depuis fem/modal.py)
-    def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
-        n = M.shape[0]
-        constrained = []
-        for i in range(n):
-            rowM = M[i, :].copy(); rowM[i] = 0.0
-            colM = M[:, i].copy(); colM[i] = 0.0
-            rowK = K[i, :].copy(); rowK[i] = 0.0
-            colK = K[:, i].copy(); colK[i] = 0.0
-            if (
-                np.all(np.abs(rowM) <= atol) and np.all(np.abs(colM) <= atol)
-                and np.all(np.abs(rowK) <= atol) and np.all(np.abs(colK) <= atol)
-                and np.isclose(M[i, i], 1.0, atol=1e-9) and np.isclose(K[i, i], 1.0, atol=1e-9)
-            ):
-                constrained.append(i)
-        return np.asarray(constrained, dtype=int)
-
-    def calculer_frequences_et_modes(M: np.ndarray, K: np.ndarray, num_modes: int = 4):
-        if M.shape != K.shape or M.ndim != 2 or M.shape[0] != M.shape[1]:
-            raise ValueError("M et K doivent être carrées et de même taille")
-        n = M.shape[0]
-        constrained = detecter_ddl_contraints_mk(M, K)
-        free = np.setdiff1d(np.arange(n), constrained)
-        if free.size == 0:
-            raise ValueError("Aucun DDL libre détecté pour l'analyse modale")
-
-        M_ff = M[np.ix_(free, free)]
-        K_ff = K[np.ix_(free, free)]
-
-        A = np.linalg.solve(M_ff, K_ff)
-        eigvals, eigvecs = np.linalg.eig(A)
-        eigvals = np.real(eigvals)
-        eigvals[eigvals < 0] = 0.0
-        omegas = np.sqrt(eigvals)
-        idx = np.argsort(omegas)
-        omegas = omegas[idx]
-        V = np.real(eigvecs[:, idx])
-
-        k = int(min(num_modes, V.shape[1]))
-        omegas_k = omegas[:k]
-        V_k = V[:, :k]
-
-        modes_full = np.zeros((n, k), dtype=float)
-        for j in range(k):
-            v = V_k[:, j]
-            norm = float(np.sqrt(v.T @ (M_ff @ v)))
-            vj = v if norm <= 0 else v / norm
-            full = np.zeros(n, dtype=float)
-            full[free] = vj
-            modes_full[:, j] = full
-
-        freqs_hz = omegas_k / (2.0 * np.pi)
-        return freqs_hz, modes_full
 
     # ==============================================
     # SECTION 1 — CALCUL : Assemblage de M, C, K et validation
@@ -118,7 +76,8 @@ def main() -> None:
     else:
         M, K, C = res[:3]
         meta = {}
-    print("[INFO] Matrices assemblées à partir du config.")
+    if getattr(_cfg, "DEBUG_ENABLED", False):
+        print("[INFO] Matrices assemblées depuis la configuration.")
 
     # Validate shapes, symmetry and boundary conditions
     valider_mck(M, C, K, verbose=True)
@@ -157,7 +116,8 @@ def main() -> None:
     U0 = np.zeros(M.shape[0], dtype=float)
     U_nm1 = U0.copy()
     U_n = U0.copy()
-    print(f"U0 initialisé: shape={U0.shape}, max={np.nanmax(U0):.3e}, min={np.nanmin(U0):.3e}")
+    if getattr(_cfg, "DEBUG_ENABLED", False):
+        print(f"U0 initialisé: shape={U0.shape}, max={np.nanmax(U0):.3e}, min={np.nanmin(U0):.3e}")
 
     # Premier pas via différences centrales (diagnostic)
     _ = calculer_u1(M, C, K, U_n=U_n, U_nm1=U_nm1, delta_t=delta_t)
@@ -170,7 +130,8 @@ def main() -> None:
     n = M.shape[0]
     x_coords = build_node_positions_from_config(n)
     freqs_hz, modes_full = calculer_frequences_et_modes(M, K, num_modes=4)
-    print("Premières fréquences (Hz):", np.round(freqs_hz, 3))
+    if (CONFIG := getattr(_cfg, "DEBUG_ENABLED", False)):
+        print("Premières fréquences (Hz) :", np.round(freqs_hz, 3))
 
     # ==============================================
     # SECTION 5 — CALCUL : Définition des forces externes et intégration
@@ -261,13 +222,15 @@ def main() -> None:
 
     # Choix du flux d'intégration selon la configuration: avec ou sans événements de pression
     if bool(getattr(_cfg, "PRESS_EVENTS_ENABLED", False)):
-        print("[INFO] PRESS_EVENTS_ENABLED=True → simulation with press events (simulate_with_press)")
+        if getattr(_cfg, "DEBUG_ENABLED", False):
+            print("[INFO] PRESS_EVENTS_ENABLED=True → simulation with press events (simulate_with_press)")
         t_vec, U_hist, V_hist, A_hist = simulate_with_press(
             M, K, alpha, beta, F_total, delta_t, press_events, T_total, U0=U0, V0=V0_zero
         )
     else:
         # Flux normal: intégration unique avec la force résultante F_total (fonction F(t,k))
-        print("[INFO] PRESS_EVENTS_ENABLED=False → normal simulation (integrer_newmark_beta)")
+        if getattr(_cfg, "DEBUG_ENABLED", False):
+            print("[INFO] PRESS_EVENTS_ENABLED=False → normal simulation (integrer_newmark_beta)")
         t_vec, U_hist, V_hist, A_hist = integrer_newmark_beta(
             M, C, K, F_total, delta_t, T_total, U0=U0, V0=V0_zero
         )
@@ -284,6 +247,12 @@ def main() -> None:
         csv_path = plots_dir / "string_positions.csv"
         # write CSV using the I/O package (lightweight)
         enregistrer_deplacement_csv(t_vec, U_hist, str(csv_path))
+        # generate audio files from the CSV just produced
+        try:
+            generate_multiple_positions_audio(str(csv_path))
+        except Exception as _ea:  # pragma: no cover
+            print(f"[WARN] Unable to generate audio from positions: {_ea}")
+        
 
     # 6.2) PLOTS — Modes and other heavy post-processing
     if bool(getattr(_cfg, "OUTPUT_ENABLE_IMAGES", True)):

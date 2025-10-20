@@ -38,15 +38,8 @@ def _moving_rms(x: np.ndarray, win: int) -> np.ndarray:
 
 
 def _x_positions_from_config(n_nodes: int) -> Optional[np.ndarray]:
-    # Tente de récupérer des coordonnées physiques x (en mètres) à partir du module config.
-    # - Si FRET_DXS_MM existe: utilise la cumulée de ces dx (en m).
-    # - Sinon, si L et N_NODES existent: utilise un linspace uniforme [0, L].
-    # Retourne None en cas d'échec.
+    # Tenta de recuperar coordenadas físicas x (em metros) a partir do módulo de configuração
     try:
-    # Ajuste sys.path pour importer le paquet
-        ROOT = Path(__file__).resolve().parents[3]
-        if str(ROOT) not in sys.path:
-            sys.path.insert(0, str(ROOT))
         from digital_twin.back_end import config as _cfg  # type: ignore
     except Exception:
         return None
@@ -54,7 +47,7 @@ def _x_positions_from_config(n_nodes: int) -> Optional[np.ndarray]:
     try:
         dxs_mm = getattr(_cfg, "FRET_DXS_MM", None)
         if dxs_mm and len(dxs_mm) == n_nodes - 1:
-            dxs_m = np.asarray([d/1000.0 for d in dxs_mm], dtype=float)
+            dxs_m = np.asarray([d / 1000.0 for d in dxs_mm], dtype=float)
             x = np.concatenate([[0.0], np.cumsum(dxs_m)])
             return x
         # fallback uniforme
@@ -86,7 +79,7 @@ def plot_wave_and_damping(csv_path: Path, node_index: int | None = None, save_pn
     # Axe X physique (optionnel)
     x = _x_positions_from_config(n_nodes)
     x_nodes = x if x is not None else np.arange(n_nodes)
-    x_label = "Posição (m)" if x is not None else "Índice do nó"
+    x_label = "Position (m)" if x is not None else "Indice du nœud"
 
     # Figure avec deux panneaux
     fig = plt.figure(figsize=(12, 6))
@@ -124,7 +117,7 @@ def plot_wave_and_damping(csv_path: Path, node_index: int | None = None, save_pn
     ax3.set_title(f"Amortissement — nœud {node_index}")
     ax3.set_xlabel("Temps (s)")
     ax3.set_ylabel("Déplacement (m)")
-    ax3.plot(t, np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0), label="Sinal")
+    ax3.plot(t, np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0), label="Signal")
     ax3.plot(t, np.nan_to_num(env, nan=0.0, posinf=0.0, neginf=0.0), "k", lw=2, label="Envelope (RMS)")
     ax3.legend(loc="best")
 

@@ -11,7 +11,7 @@ def plot_first_modes(x: np.ndarray, modes_full: np.ndarray, freqs_hz: np.ndarray
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except Exception as e:  # pragma: no cover
-        print("[AVERTISSEMENT] matplotlib indisponible pour tracer les modes:", e)
+        print("[AVERTISSEMENT] matplotlib indisponible pour tracer les modes :", e)
         return
 
     m = int(min(max_modes, modes_full.shape[1]))
@@ -51,7 +51,7 @@ def save_string_frame_png(
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except Exception as e:  # pragma: no cover
-        print("[AVERTISSEMENT] Matplotlib indisponible pour enregistrer l'image:", e)
+        print("[AVERTISSEMENT] Matplotlib indisponible pour enregistrer l'image :", e)
         return
     from pathlib import Path as _P
     out = _P(savepath)
@@ -105,7 +105,7 @@ def plot_snapshots_png(
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except Exception as e:  # pragma: no cover
-        print("[AVERTISSEMENT] Matplotlib indisponible pour les instantanés:", e)
+        print("[AVERTISSEMENT] Matplotlib indisponible pour les instantanés :", e)
         return
     from pathlib import Path as _P
     out = _P(savepath)

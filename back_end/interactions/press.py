@@ -14,32 +14,17 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, List, Tuple, Dict, Optional
 import numpy as np
 
-try:
-    # Intégrateur (FR)
-    from digital_twin.back_end.fem.time_integration import integrer_newmark_beta  # type: ignore
-except Exception:  # pragma: no cover
-    try:
-        from ..fem.time_integration import integrer_newmark_beta  # type: ignore
-    except Exception:
-        # Fallback: exécution directe sans contexte de package
-        try:
-            import sys
-            from pathlib import Path
-            ROOT = Path(__file__).resolve().parents[3]  # repo root contenant 'digital_twin'
-            if str(ROOT) not in sys.path:
-                sys.path.insert(0, str(ROOT))
-            from digital_twin.back_end.fem.time_integration import integrer_newmark_beta  # type: ignore
-        except Exception as exc:
-            raise
+from digital_twin.back_end.fem.time_integration import integrer_newmark_beta  # type: ignore
 
 # Debug minimal (optionnel)
 try:
     from digital_twin.back_end.utils import debug as dbg  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     class _DbgNoOp:
         ENABLED = False
         @staticmethod
-        def dprint(*args, **kwargs): pass
+        def dprint(*args, **kwargs):
+            pass
     dbg = _DbgNoOp()  # type: ignore
 
 DEBUG_PRESS: bool = True
@@ -323,7 +308,7 @@ if __name__ == "__main__":
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except Exception as exc:
-        print("[ERREUR] matplotlib est requis pour ce banc d'essai:", exc)
+        print("[ERREUR] matplotlib est requis pour ce banc d'essai :", exc)
         sys.exit(1)
 
     # Imports tardifs pour éviter des dépendances lourdes au chargement du module
@@ -336,7 +321,7 @@ if __name__ == "__main__":
             from digital_twin.back_end.fem.formulation import build_global_mkc_from_config, amortissement_rayleigh  # type: ignore
             from digital_twin.back_end import config  # type: ignore
         except Exception as exc:
-            print("[ERREUR] Impossible d'importer formulation/config:", exc)
+            print("[ERREUR] Impossible d'importer formulation/config :", exc)
             sys.exit(1)
 
     # Excitation (fournisseur FR)
@@ -346,7 +331,7 @@ if __name__ == "__main__":
         try:
             from digital_twin.back_end.interactions.excitation import fournisseur_force_localisee  # type: ignore
         except Exception as exc:
-            print("[ERREUR] Impossible d'importer interactions.excitation:", exc)
+            print("[ERREUR] Impossible d'importer interactions.excitation :", exc)
             sys.exit(1)
 
     # 1) Matrices globales (avec CL fixes) + paramètres Rayleigh

@@ -10,84 +10,10 @@ from __future__ import annotations
 import numpy as np
 from typing import Any, Callable
 
-# Debug import (safe fallback)
-try:
-    from ..utils import debug as dbg  # type: ignore
-except Exception:
-    try:
-        from digital_twin.back_end.utils import debug as dbg  # type: ignore
-    except Exception:
-        class _DbgNoOp:
-            # provide attribute-based API compatibility
-            ENABLED = False
-            # legacy per-print flags removed; rely on ENABLED
-
-            @staticmethod
-            def dprint(*args, **kwargs):
-                pass
-
-            @staticmethod
-            def get_solver_sample_interval(n_steps: int) -> int:
-                try:
-                    return max(1, int(round(n_steps / 50)))
-                except Exception:
-                    return 100
-
-            @staticmethod
-            def print_solver_setup_summary(*args, **kwargs):
-                pass
-
-            @staticmethod
-            def print_newmark_constants(*args, **kwargs):
-                pass
-
-            @staticmethod
-            def print_step_snapshot(*args, **kwargs):
-                pass
-
-            @staticmethod
-            def print_energy_start_end(*args, **kwargs):
-                pass
-
-        dbg = _DbgNoOp()  # type: ignore
+from ..utils import debug as dbg  # type: ignore
 
 
-# Détection des GL (DDLs) contraints — implémentation locale (maintenue ici)
-def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
-
-    # .shape[0] : nombre de DDLs
-    n = M.shape[0]
-
-    # Matrices auxiliaires pour les critères
-    constrained = []
-
-    # Itérer sur chaque DDL et vérifier les conditions de contrainte
-    for i in range(n):
-
-        # Lignes/colonnes hors diagonale ≈ 0
-        # .copy() pour éviter de modifier M/K originales
-        rowM = M[i, :].copy(); rowM[i] = 0.0
-        colM = M[:, i].copy(); colM[i] = 0.0
-        rowK = K[i, :].copy(); rowK[i] = 0.0
-        colK = K[:, i].copy(); colK[i] = 0.0
-
-        # Vérification des critères de contrainte
-        # - lignes/colonnes hors diag ≈ 0
-        # - diag ≈ 1.0
-        # - M[i, i] ≈ 1.0
-        # - K[i, i] ≈ 1.0
-        # .isclose pour comparaisons avec tolérance
-        if (
-            np.all(np.abs(rowM) <= atol) and np.all(np.abs(colM) <= atol)
-            and np.all(np.abs(rowK) <= atol) and np.all(np.abs(colK) <= atol)
-            and np.isclose(M[i, i], 1.0, atol=1e-9) and np.isclose(K[i, i], 1.0, atol=1e-9)
-        ):
-            # DDL i est contraint
-            constrained.append(i)
-
-    # Retourner les indices contraints sous forme de numpy.ndarray
-    # .asarray pour conversion de liste Python à ndarray
-    return np.asarray(constrained, dtype=int)
+from .modal import detecter_ddl_contraints_mk  # type: ignore
 
 # Définit les paramètres temporels de simulation.
 def definir_parametres_simulation(delta_t: float, T_total: float):
@@ -315,20 +241,42 @@ def integrer_newmark_beta(
     Cff = C[np.ix_(free, free)]                         # Sous-matrice libre de C
 
     # Conditions initiales pour DDLs libres
+    # .zeros pour initialiser à zéro si None
+    # .asarray pour assurer le type numpy.ndarray
     U0f = np.zeros(free.size, dtype=float) if U0 is None else np.asarray(U0, dtype=float)[free]
     V0f = np.zeros(free.size, dtype=float) if V0 is None else np.asarray(V0, dtype=float)[free]
     if A0 is None:                                      # Calculer A0f si non fourni
-        if callable(F):                                 # F est une fonction    
+        if callable(F):                                 # F est une fonction 
+
+            # Obtenir F(0) et extraire les DDLs libres
+            # .asarray pour assurer le type numpy.ndarray
+            # .reshape(n) pour garantir la bonne forme (évite erreurs de dimension)   
             F0_full = np.asarray(F(0.0, 0), dtype=float).reshape(n)
         else:
+
+            # F est un tableau numpy
+            # .asarray pour assurer le type numpy.ndarray
             F_arr = np.asarray(F, dtype=float)
+
+            # Extraire F0 (1ère colonne) ou zéro si non disponible
+            # .ndim pour vérifier la dimension
+            # .shape[1] pour vérifier le nombre de colonnes
+            # .zeros pour initialiser à zéro si non disponible
             F0_full = F_arr[:, 0] if (F_arr.ndim == 2 and F_arr.shape[1] >= 1) else np.zeros(n)
+
+        # Résolution pour A0f : A0f = Mff^{-1}(F0f − Cff V0f − Kff U0f)
         A0f = np.linalg.solve(Mff, F0_full[free] - Cff @ V0f - Kff @ U0f)
     else:
+
+        # A0 est fourni directement
+        # .asarray pour assurer le type numpy.ndarray
         A0f = np.asarray(A0, dtype=float)[free]
 
+    # Calcul des constantes Newmark-beta (β=1/4, γ=1/2)
     beta = 1.0 / 4.0
     gamma = 1.0 / 2.0
+   
+    # Coefficients auxiliaires
     a0 = 1.0 / (beta * dt * dt)
     a1 = gamma / (beta * dt)
     a2 = 1.0 / (beta * dt)
@@ -342,15 +290,23 @@ def integrer_newmark_beta(
         except Exception:
             pass
 
+    # Matrice efficace constante, c'est utile pour chaque pas k→k+1
     K_eff = Kff + a1 * Cff + a0 * Mff
 
+    # Initialisation des tableaux de résultats
     U = np.zeros((n, n_steps), dtype=float)
     V = np.zeros((n, n_steps), dtype=float)
     A = np.zeros((n, n_steps), dtype=float)
+
+    # Assignation des conditions initiales
     U[free, 0] = U0f
     V[free, 0] = V0f
     A[free, 0] = A0f
+
+    # Appliquer conditions initiales aux DDLs contraints (zéro)
     if constrained.size:
+
+        # Initiales à zéro pour DDLs contraints
         U[constrained, 0] = 0.0
         V[constrained, 0] = 0.0
         A[constrained, 0] = 0.0
@@ -361,14 +317,20 @@ def integrer_newmark_beta(
         fixed_every = int(getattr(dbg, 'get_fixed_step_interval', lambda: 0)() or 0)  # type: ignore[attr-defined]
     except Exception:
         fixed_every = 0
+
+    # Boucle temporelle principale
     for k in range(n_steps - 1):
         Uf_k = U[free, k]
         Vf_k = V[free, k]
         Af_k = A[free, k]
 
+        # Obtenir F_{k+1}^f
         if callable(F):
+            
+            # F est une fonction qui dépend de t et k
             Fk1_full = np.asarray(F(t[k + 1], k + 1), dtype=float).reshape(n)
             Fk1 = Fk1_full[free]
+
         else:
             F_arr = np.asarray(F, dtype=float)
             if F_arr.ndim == 2 and F_arr.shape[1] > k + 1:
@@ -376,19 +338,30 @@ def integrer_newmark_beta(
             else:
                 Fk1 = np.zeros(free.size, dtype=float)
 
+        # Calcul du second membre et résolution pour U_{k+1}^f
+        # Formule:
+        # RHS = F_{k+1}^f + M_ff(a0 U_k^f + a2 V_k^f + a3 A_k^f) + C_ff(a1 U_k^f + a4 V_k^f + a5 A_k^f)
+        # @ -> produit matriciel/vecteur
         RHS = (
             Fk1
             + Mff @ (a0 * Uf_k + a2 * Vf_k + a3 * Af_k)
             + Cff @ (a1 * Uf_k + a4 * Vf_k + a5 * Af_k)
         )
 
+        # Résolution du système linéaire pour U_{k+1}^f
+        # .solve pour K_eff U_{k+1}^f = RHS
         Uf_k1 = np.linalg.solve(K_eff, RHS)
-        Af_k1 = a0 * (Uf_k1 - Uf_k) - a2 * Vf_k - a3 * Af_k
-        Vf_k1 = Vf_k + dt * ((1.0 - gamma) * Af_k + gamma * Af_k1)
 
+        # Mise à jour de A_{k+1}^f et V_{k+1}^f
+        Af_k1 = a0 * (Uf_k1 - Uf_k) - a2 * Vf_k - a3 * Af_k
+        Vf_k1 = Vf_k + dt * ((1.0 - gamma) * Af_k + gamma * Af_k1)  
+
+        # Stockage des résultats dans les tableaux globaux
         U[free, k + 1] = Uf_k1
         V[free, k + 1] = Vf_k1
         A[free, k + 1] = Af_k1
+
+        # Appliquer conditions de contrainte aux DDLs contraints (zéro)
         if constrained.size:
             U[constrained, k + 1] = 0.0
             V[constrained, k + 1] = 0.0
@@ -415,23 +388,35 @@ def integrer_newmark_beta(
 
     return t, U, V, A
 
-
+# Calcule énergie cinétique, potentielle et totale au cours du temps.
 def calculer_energies_dans_le_temps(M: np.ndarray, K: np.ndarray, U: np.ndarray, V: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Calcule énergie cinétique, potentielle et totale au cours du temps.
 
-    Pour chaque pas k:
-    - E_cin(k) = 1/2 · V_k^T (M V_k)
-    - E_pot(k) = 1/2 · U_k^T (K U_k)
-    - E_tot(k) = E_cin(k) + E_pot(k)
-    """
+    # Nombre de pas de temps
+    # .shape[1] pour nombre de colonnes (pas de temps)
     n_steps = U.shape[1]
+
+    # Initialisation des tableaux d'énergie
+    # .zeros pour initialiser à zéro
     Ek = np.zeros(n_steps, dtype=float)
     Ep = np.zeros(n_steps, dtype=float)
+
+    # Boucle sur chaque pas de temps pour calculer les énergies
     for k in range(n_steps):
+
+        # Extraction des vecteurs V_k et U_k
         v = V[:, k]
         u = U[:, k]
+
+        # Calcul des énergies cinétique et potentielle
         # produits matriciels/vecteurs via @ (NumPy: v.T @ (M @ v) = scalaire)
+        # - E_cin(k) = 1/2 · V_k^T (M V_k)
+        # - E_pot(k) = 1/2 · U_k^T (K U_k)
         Ek[k] = 0.5 * float(v.T @ (M @ v))
         Ep[k] = 0.5 * float(u.T @ (K @ u))
+    
+    # Calcul de l'énergie totale
+    # - E_tot(k) = E_cin(k) + E_pot(k)
     Etot = Ek + Ep
+
+    # Retour des résultats
     return Ek, Ep, Etot

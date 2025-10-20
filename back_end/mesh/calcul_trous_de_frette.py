@@ -14,11 +14,12 @@ Permettre :
 
 Usage typique
 -------------
-        python calcul_trous_de_frette.py
+    python calcul_trous_de_frette.py
 
-Le script essaye d'abord d'importer le package installé (mode projet). S'il est
-exécuté directement depuis le dossier, un fallback ajoute la racine du projet à
-`sys.path`.
+Ce script suppose que le package `digital_twin` est disponible (par ex. via
+`pip install -e .` dans un environnement virtuel) ou qu'il est exécuté comme
+module de package (ex: `python -m digital_twin.back_end.mesh.calcul_trous_de_frette`).
+L'exécution directe depuis le dossier sans installation peut échouer.
 
 Notes d'implémentation
 ----------------------
@@ -36,26 +37,11 @@ from typing import Optional  # (Ici pas indispensable, conservé si extension fu
 # 2. En cas d'échec (exécution directe hors contexte package), insertion de la
 #    racine du projet dans sys.path puis nouvel import.
 # ---------------------------------------------------------------------------
-try:
-    from digital_twin.back_end.mesh.fret_mesh import (
-        gerar_malha_trastes,
-        inject_into_config,
-    )
-    from digital_twin.back_end import config as dt_config
-except Exception:
-    import sys
-    from pathlib import Path
-    this_file = Path(__file__).resolve()
-    mesh_dir = this_file.parent                # .../back_end/mesh
-    back_end_dir = mesh_dir.parent             # .../back_end
-    project_root = back_end_dir.parent.parent  # racine (contient digital_twin)
-    if str(project_root) not in sys.path:      # Ajout sécurisé (idempotent)
-        sys.path.insert(0, str(project_root))
-    from digital_twin.back_end.mesh.fret_mesh import (  # type: ignore
-        gerar_malha_trastes,
-        inject_into_config,
-    )
-    from digital_twin.back_end import config as dt_config  # type: ignore
+from digital_twin.back_end.mesh.fret_mesh import (
+    generer_maille_frettes,
+    inject_into_config,
+)
+from digital_twin.back_end import config as dt_config
 
 # ---------------------------------------------------------------------------
 #                     Fonction d'affichage principal
@@ -80,7 +66,7 @@ def _print_result(res, premiers_dx: int):
 
     print("\n=== RÉSUMÉ GÉNÉRAL ===")
     print(f"Longueur totale (segments jusqu'à la frette {res.total_trastes}) : {res.soma_teorica_mm:.2f} mm")
-    print(f"Cible dx ~ {res.dx_alvo_mm} mm")
+    print(f"Pas cible (dx) ≈ {res.dx_alvo_mm} mm")
     print(f"Nombre total d'éléments : {total_elems}")
     print(f"dx moyen : {media:.3f} mm")
     print(f"Valeurs uniques de dx ({len(uniq)}) : {', '.join(f'{u:.2f}' for u in uniq)}")
@@ -129,7 +115,7 @@ if __name__ == "__main__":
         from digital_twin.back_end import config as _cfg  # type: ignore
         expoente = _cfg.FRET_EXPOSANT_GEOMETRIQUE
     except Exception as exc:               # pragma: no cover
-        raise RuntimeError("[ERROR] FRET_EXPOSANT_GEOMETRIQUE manquant dans config ou import de config échoué") from exc
+        raise RuntimeError("[ERREUR] FRET_EXPOSANT_GEOMETRIQUE manquant dans config ou import de config échoué") from exc
     # Exposant géométrique centralisé (config.FRET_EXPOSANT_GEOMETRIQUE)
     injecter_dans_config = True     # Si True : applique FRET_* et override core dans config
 

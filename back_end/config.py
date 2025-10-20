@@ -216,15 +216,15 @@ SNAPSHOTS_SHOW_LEGEND = False    # True / False
 
 # Interrupteur central de débogage (único ON/OFF)
 # Agora todas as flags de debug dependem apenas de DEBUG_ENABLED.
-DEBUG_ENABLED: bool = True
+DEBUG_ENABLED: bool = False
 
 # Interrupteurs pour activer/désactiver les sorties de fichiers (pour débogage terminal uniquement)
 # OUTPUT_ENABLE_IMAGES : contrôle tous les PNG (modes, x(t), énergies, FFT, snapshots, frame t0)
 # OUTPUT_ENABLE_GIFS : contrôle l'animation GIF
 # OUTPUT_ENABLE_CSV : contrôle l'export CSV des déplacements
-OUTPUT_ENABLE_IMAGES: bool = True
-OUTPUT_ENABLE_GIFS: bool = True
-OUTPUT_ENABLE_CSV: bool = True
+OUTPUT_ENABLE_IMAGES: bool = False
+OUTPUT_ENABLE_GIFS: bool = False
+OUTPUT_ENABLE_CSV: bool = False
 # NOTE : Ces interrupteurs n'affectent pas le calcul (Newmark, M/K/C), uniquement les E/S.
 
 # Activer/désactiver l'utilisation d'événements de pression (simulate_with_press)

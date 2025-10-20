@@ -43,13 +43,13 @@ class CordeWidget(QWidget):
         self._strikeCursorColor = QColor("#f59e0b")  # couleur distincte pour le curseur d'attaque
         # couleur du rastilho (bridge)
         self._bridgeColor = QColor("#9AA3B2")
-        # exibir rótulo do rastilho ("R") — desativado por padrão
+        # afficher l'étiquette du chevalet ("R") — désactivé par défaut
         self._showBridgeLabel = False
 
         # --- géométrie issue du back-end (config) ---
         # Nous construisons la discrétisation normalisée [0..1] directement à partir de
         # digital_twin.back_end.config.FRET_NODE_POSITIONS_MM (cumule) et FRET_DXS_MM.
-    # Si indisponible, nous retombons sur une échelle à pas réguliers (fallback simple).
+        # Si indisponible, nous retombons sur une échelle à pas réguliers (fallback simple).
         self._node_fracs = [0.0]
         self._have_backend_geom = False
         self._total_length_m = 1.0
@@ -543,7 +543,7 @@ class CordeWidget(QWidget):
             x = float(event.pos().x())
             frac = (x - start_x) / max(1.0, float(length_vis))
             frac = max(0.0, min(1.0, frac))
-            # converte para a escala completa [0..1] dentro do trecho visível
+            # convertit en échelle complète [0..1] dans la portion visible
             pos_norm = float(frac * float(self._scaleRightFrac))
             try:
                 self.clickedAt.emit(pos_norm)
