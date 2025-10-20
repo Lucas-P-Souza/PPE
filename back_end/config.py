@@ -150,9 +150,9 @@ PLUCK_AMP: float = 0.003  # mm
 # EXCITATION_T_HOLD : temps de palier (s)
 # EXCITATION_T_DECAY: temps de décroissance (s)
 EXCITATION_F_MAX: float = 1.0           # Newts
-EXCITATION_T_RISE: float = 0.001        # s
+EXCITATION_T_RISE: float = 0.002        # s
 EXCITATION_T_HOLD: float = 0.001        # s
-EXCITATION_T_DECAY: float = 0.003       # s
+EXCITATION_T_DECAY: float = 0.001       # s
 # NOTE : Ces paramètres définissent une force temporelle localisée appliquée
 
 # Deuxième excitation optionnelle (re-pincement) — temps de début (s)

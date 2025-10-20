@@ -9,9 +9,7 @@ try:
     from digital_twin.back_end.utils.validators import valider_mck  # type: ignore
     from digital_twin.back_end.fem.time_integration import (  # type: ignore
         definir_parametres_simulation,
-        initialiser_etats_initiaux,
         calculer_u1,
-        fournisseur_force_nulle,
         fournisseur_force_localisee,
         somme_de_forces,
         integrer_newmark_beta,
@@ -19,7 +17,6 @@ try:
     )
     # Importer depuis les nouveaux modules organisés
     from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
-    from digital_twin.back_end.fem.modal import calculer_frequences_et_modes  # type: ignore
     # heavy plotting/fft imports moved to post-processing (SECTION 6) to
     # avoid importing SciPy/matplotlib during simulation startup
     from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
@@ -37,16 +34,13 @@ except ModuleNotFoundError:
     from digital_twin.back_end.utils.validators import valider_mck  # type: ignore
     from digital_twin.back_end.fem.time_integration import (  # type: ignore
         definir_parametres_simulation,
-        initialiser_etats_initiaux,
         calculer_u1,
-        fournisseur_force_nulle,
         fournisseur_force_localisee,
         somme_de_forces,
         integrer_newmark_beta,
         calculer_energies_dans_le_temps,
     )
     from digital_twin.back_end.fem.formulation import build_node_positions_from_config  # type: ignore
-    from digital_twin.back_end.fem.modal import calculer_frequences_et_modes  # type: ignore
     # heavy plotting/fft imports moved to post-processing (SECTION 6) to
     # avoid importing SciPy/matplotlib during simulation startup
     from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
@@ -56,6 +50,60 @@ except ModuleNotFoundError:
 
 def main() -> None:
     ROOT = Path(__file__).resolve().parents[2]
+
+    # Implémentation inlinée de fonctions modales (migrées depuis fem/modal.py)
+    def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
+        n = M.shape[0]
+        constrained = []
+        for i in range(n):
+            rowM = M[i, :].copy(); rowM[i] = 0.0
+            colM = M[:, i].copy(); colM[i] = 0.0
+            rowK = K[i, :].copy(); rowK[i] = 0.0
+            colK = K[:, i].copy(); colK[i] = 0.0
+            if (
+                np.all(np.abs(rowM) <= atol) and np.all(np.abs(colM) <= atol)
+                and np.all(np.abs(rowK) <= atol) and np.all(np.abs(colK) <= atol)
+                and np.isclose(M[i, i], 1.0, atol=1e-9) and np.isclose(K[i, i], 1.0, atol=1e-9)
+            ):
+                constrained.append(i)
+        return np.asarray(constrained, dtype=int)
+
+    def calculer_frequences_et_modes(M: np.ndarray, K: np.ndarray, num_modes: int = 4):
+        if M.shape != K.shape or M.ndim != 2 or M.shape[0] != M.shape[1]:
+            raise ValueError("M et K doivent être carrées et de même taille")
+        n = M.shape[0]
+        constrained = detecter_ddl_contraints_mk(M, K)
+        free = np.setdiff1d(np.arange(n), constrained)
+        if free.size == 0:
+            raise ValueError("Aucun DDL libre détecté pour l'analyse modale")
+
+        M_ff = M[np.ix_(free, free)]
+        K_ff = K[np.ix_(free, free)]
+
+        A = np.linalg.solve(M_ff, K_ff)
+        eigvals, eigvecs = np.linalg.eig(A)
+        eigvals = np.real(eigvals)
+        eigvals[eigvals < 0] = 0.0
+        omegas = np.sqrt(eigvals)
+        idx = np.argsort(omegas)
+        omegas = omegas[idx]
+        V = np.real(eigvecs[:, idx])
+
+        k = int(min(num_modes, V.shape[1]))
+        omegas_k = omegas[:k]
+        V_k = V[:, :k]
+
+        modes_full = np.zeros((n, k), dtype=float)
+        for j in range(k):
+            v = V_k[:, j]
+            norm = float(np.sqrt(v.T @ (M_ff @ v)))
+            vj = v if norm <= 0 else v / norm
+            full = np.zeros(n, dtype=float)
+            full[free] = vj
+            modes_full[:, j] = full
+
+        freqs_hz = omegas_k / (2.0 * np.pi)
+        return freqs_hz, modes_full
 
     # ==============================================
     # SECTION 1 — CALCUL : Assemblage de M, C, K et validation
@@ -83,16 +131,21 @@ def main() -> None:
     nos_press = [6, 11, 17, 21, 25, 29, 34, 38, 41, 44, 48, 51]
     #nos_press = [6]
     dur_press = 1  # duração da pressão em cada nó
-    t0 = 0.0
+    # Inserir 1s de pausa antes do primeiro press (solicitado)
+    t0 = 1.0
     exc_times = []
     press_events = []
-    for node_press in nos_press:
+    for idx, node_press in enumerate(nos_press, start=1):
         t_press_on = t0
         t_pinc = t_press_on + 0.1  # pincamento logo após pressionar
         t_press_off = t_press_on + dur_press
         exc_times.append(t_pinc)
         press_events.append(PressEvent(node=node_press, t_on=t_press_on, t_off=t_press_off, ks=5e4, cs=0.0))
-        t0 = t_press_off  # próximo nó pressionado imediatamente após soltar o anterior
+        # Após o 6º press (idx == 6) adicionar 1s extra de pausa antes do próximo press
+        if idx == 6:
+            t0 = t_press_off + 1.0
+        else:
+            t0 = t_press_off  # próximo nó pressionado imediatamente após soltar o anterior
     T_total = t0 + 0.5
     definir_parametres_simulation(delta_t, T_total)
 

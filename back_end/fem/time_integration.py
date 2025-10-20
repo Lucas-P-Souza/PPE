@@ -1,14 +1,10 @@
-"""
-Intégration temporelle et conditions initiales pour la corde vibrante (FEM).
+# Intégration temporelle et conditions initiales pour la corde vibrante (FEM).
+# Ce module regroupe UNIQUEMENT:
+# - l'intégrateur de Newmark-beta (β=1/4, γ=1/2, stable inconditionnel pour systèmes linéaires),
+# - les conditions initiales (pincement triangulaire) et un calcul du premier pas (diagnostic),
+# - les paramètres de simulation et le calcul d'énergies au cours du temps,
+# - un fournisseur de force nulle (F(t) ≡ 0).
 
-Ce module regroupe UNIQUEMENT l'API canonique en français:
-    - l'intégrateur de Newmark-beta (β=1/4, γ=1/2, stable inconditionnel pour systèmes linéaires),
-    - les conditions initiales (pincement triangulaire) et un calcul du premier pas (diagnostic),
- - les paramètres de simulation et le calcul d'énergies au cours du temps,
- - un fournisseur de force nulle (F(t) ≡ 0).
-
-Remarque: un utilitaire pour détecter les DDL contraints est importé depuis fem/modal.
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -56,151 +52,120 @@ except Exception:
         dbg = _DbgNoOp()  # type: ignore
 
 
-# Détection des GL (DDLs) contraints (import depuis fem.modal)
-try:
-    from .modal import detecter_ddl_contraints_mk  # type: ignore
-except Exception:
-    # Fallback local minimal si l'import échoue (devrait rarement arriver)
-    def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
-        """Détecte les DDLs contraints de type Dirichlet selon la convention du projet.
-        Critère utilisé: lignes/colonnes ≈ 0 hors diagonale et diag ≈ 1 aux extrémités.
-        """
-        n = M.shape[0]
-        constrained = []
-        for i in range(n):
-            rowM = M[i, :].copy(); rowM[i] = 0.0
-            colM = M[:, i].copy(); colM[i] = 0.0
-            rowK = K[i, :].copy(); rowK[i] = 0.0
-            colK = K[:, i].copy(); colK[i] = 0.0
-            if (
-                np.all(np.abs(rowM) <= atol) and np.all(np.abs(colM) <= atol)
-                and np.all(np.abs(rowK) <= atol) and np.all(np.abs(colK) <= atol)
-                and np.isclose(M[i, i], 1.0, atol=1e-9) and np.isclose(K[i, i], 1.0, atol=1e-9)
-            ):
-                constrained.append(i)
-        return np.asarray(constrained, dtype=int)
+# Détection des GL (DDLs) contraints — implémentation locale (maintenue ici)
+def detecter_ddl_contraints_mk(M: np.ndarray, K: np.ndarray, atol: float = 1e-12) -> np.ndarray:
 
+    # .shape[0] : nombre de DDLs
+    n = M.shape[0]
+
+    # Matrices auxiliaires pour les critères
+    constrained = []
+
+    # Itérer sur chaque DDL et vérifier les conditions de contrainte
+    for i in range(n):
+
+        # Lignes/colonnes hors diagonale ≈ 0
+        # .copy() pour éviter de modifier M/K originales
+        rowM = M[i, :].copy(); rowM[i] = 0.0
+        colM = M[:, i].copy(); colM[i] = 0.0
+        rowK = K[i, :].copy(); rowK[i] = 0.0
+        colK = K[:, i].copy(); colK[i] = 0.0
+
+        # Vérification des critères de contrainte
+        # - lignes/colonnes hors diag ≈ 0
+        # - diag ≈ 1.0
+        # - M[i, i] ≈ 1.0
+        # - K[i, i] ≈ 1.0
+        # .isclose pour comparaisons avec tolérance
+        if (
+            np.all(np.abs(rowM) <= atol) and np.all(np.abs(colM) <= atol)
+            and np.all(np.abs(rowK) <= atol) and np.all(np.abs(colK) <= atol)
+            and np.isclose(M[i, i], 1.0, atol=1e-9) and np.isclose(K[i, i], 1.0, atol=1e-9)
+        ):
+            # DDL i est contraint
+            constrained.append(i)
+
+    # Retourner les indices contraints sous forme de numpy.ndarray
+    # .asarray pour conversion de liste Python à ndarray
+    return np.asarray(constrained, dtype=int)
+
+# Définit les paramètres temporels de simulation.
 def definir_parametres_simulation(delta_t: float, T_total: float):
-    """Définit les paramètres temporels de simulation.
 
-    Entrées
-    - delta_t: pas de temps (s), doit être > 0
-    - T_total: durée totale (s), doit être > 0
+    # Validations simples des entrées
+    if delta_t <= 0.0:  # Temps de pas invalide
+        raise ValueError("delta_t doit être > 0")
+    if T_total <= 0.0:  # Durée totale invalide
+        raise ValueError("T_total doit être > 0")
 
-    Sorties
-    - (delta_t, T_total, n_pas, inv_dt_carre, inv_2dt)
+    # Calcul des paramètres dérivés
+    # round() pour éviter les imprécisions flottantes
+    n_pas = int(round(T_total / delta_t))       # nombre de pas de temps
+    inv_dt_carre = 1.0 / (delta_t * delta_t)    # 1/Δt²
+    inv_2dt = 1.0 / (2.0 * delta_t)             # 1/(2Δt)
 
-    Détails:
-    - n_pas = arrondi(T_total / delta_t)
-    - inv_dt_carre = 1 / (delta_t^2)  # accélère les calculs
-    - inv_2dt = 1 / (2 delta_t)
-    """
-    if delta_t <= 0.0:
-        raise ValueError("delta_t deve ser > 0")
-    if T_total <= 0.0:
-        raise ValueError("T_total deve ser > 0")
-    n_pas = int(round(T_total / delta_t))
-    inv_dt_carre = 1.0 / (delta_t * delta_t)
-    inv_2dt = 1.0 / (2.0 * delta_t)
-    if getattr(dbg, 'ENABLED', False):
+    # Debug print
+    if getattr(dbg, 'ENABLED', False):  
         dbg.dprint(f"n_pas = {n_pas}")
+
     return delta_t, T_total, n_pas, inv_dt_carre, inv_2dt
 
-
-def initialiser_u0_triangle(M: np.ndarray, *, L: float, h: float, x_p: float) -> np.ndarray:
-    """Construit un déplacement initial U0 triangulaire (pincement).
-
-    Paramètres
-    - M: matrice de masse (N,N), utilisée uniquement pour N = M.shape[0]
-    - L: longueur (m)
-    - h: amplitude du pincement (m)
-    - x_p: position du pincement (m)
-
-    Retour
-    - U0: vecteur (N,) des déplacements initiaux.
-
-    Détails et formules:
-    - Discrétisation régulière implicite via N points: Δx = L/(N-1), x_i = i·Δx
-    - U0(x) = h·(x/x_p) pour x ≤ x_p ; U0(x) = h·((L - x)/(L - x_p)) pour x > x_p
-    """
-    N = int(M.shape[0])
-    if N < 2:
-        raise ValueError("N deve ser >= 2 para inicializar U0")
-    if h is None or h <= 0.0:
-        return np.zeros(N, dtype=float)
-
-    L = float(L)
-    x_p = float(x_p)
-    delta_x = L / float(N - 1)
-    # np.arange: crée [0, 1, ..., N-1] et multiplie par Δx pour obtenir les abscisses
-    x = np.arange(N, dtype=float) * delta_x
-
-    # Vecteur gauche (croissant) et droit (décroissant) de la forme triangulaire
-    left = h * (x / x_p) if x_p > 0.0 else np.zeros_like(x)
-    denom_right = (L - x_p) if (L - x_p) > 0.0 else 1.0
-    right = h * ((L - x) / denom_right)
-    # np.where: choisit left si (x <= x_p) sinon right
-    U0 = np.where(x <= x_p, left, right)
-    return U0.astype(float, copy=False)
-
-
-def initialiser_etats_initiaux(M: np.ndarray, *, L: float, h: float, x_p: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Retourne le triplet de CI: (U0, U_nm1, U_n).
-
-    - U0: forme triangulaire
-    - U_nm1 = U0 (état à t=-Δt pour schémas à 2 pas)
-    - U_n = U0 (état à t=0)
-    """
-    U0 = initialiser_u0_triangle(M, L=L, h=h, x_p=x_p)
-    U_nm1 = U0.copy()
-    U_n = U0.copy()
-    return U0, U_nm1, U_n
-
-
+# Calcule le premier pas U1 par différences centrées (diagnostic).
 def calculer_u1(M: np.ndarray, C: np.ndarray, K: np.ndarray,
                 U_n: np.ndarray, U_nm1: np.ndarray, delta_t: float) -> np.ndarray:
-    """Calcule le premier pas U1 par différences centrées (diagnostic).
-
+    """
     Formulation (discrétisation classique):
     - A = M/Δt^2 + C/(2Δt) + K
     - rhs = (2M/Δt^2) U_n − (M/Δt^2 − C/(2Δt)) U_{n−1}
     - U_1 = A^{-1} rhs, résolu par numpy.linalg.solve
     """
-    if M.ndim != 2 or C.ndim != 2 or K.ndim != 2:
-        raise ValueError("M, C, K devem ser 2D (matrizes)")
-    if M.shape[0] != M.shape[1] or C.shape[0] != C.shape[1] or K.shape[0] != K.shape[1]:
-        raise ValueError("M, C, K devem ser quadradas")
-    if not (M.shape == C.shape == K.shape):
-        raise ValueError(f"Dimensões diferentes: M={M.shape}, C={C.shape}, K={K.shape}")
-    n = M.shape[0]
-    if U_n.shape[0] != n or U_nm1.shape[0] != n:
-        raise ValueError(f"U_n/U_nm1 incompatíveis com n={n}")
-    if delta_t <= 0.0:
-        raise ValueError("delta_t deve ser > 0")
 
-    dt = float(delta_t)
+    # Validations simples des entrées
+    # Verifie que M, C, K sont 2D
+    if M.ndim != 2 or C.ndim != 2 or K.ndim != 2:
+        raise ValueError("M, C, K doivent être 2D (matrices)")
+    
+    # Vérifie que M, C, K sont carrées
+    if M.shape[0] != M.shape[1] or C.shape[0] != C.shape[1] or K.shape[0] != K.shape[1]:
+        raise ValueError("M, C, K doivent être carrées")
+    
+    # Vérifie que M, C, K ont la même forme
+    if not (M.shape == C.shape == K.shape):
+        raise ValueError(f"Dimensions différentes : M={M.shape}, C={C.shape}, K={K.shape}")
+    
+    # Vérifie la compatibilité des vecteurs U_n, U_nm1
+    if U_n.shape[0] != M.shape[0] or U_nm1.shape[0] != M.shape[0]:
+        raise ValueError(f"U_n / U_nm1 incompatibles avec n={M.shape[0]}")
+    
+    # Vérifie delta_t > 0
+    if delta_t <= 0.0:
+        raise ValueError("delta_t doit être > 0")
+
+    # Calcul des constantes
+    dt = float(delta_t)         # Assure que dt est float
     inv_dt2 = 1.0 / (dt * dt)   # 1/Δt^2
     inv_2dt = 1.0 / (2.0 * dt)  # 1/(2Δt)
 
+    # Formulation matricielle
     # A = M/Δt^2 + C/(2Δt) + K
     A = (M * inv_dt2) + (C * inv_2dt) + K
+    
+    # Calcul du second membre
     # rhs = (2M/Δt^2) U_n − (M/Δt^2 − C/(2Δt)) U_{n−1}
     rhs = (2.0 * M * inv_dt2) @ U_n - ((M * inv_dt2) - (C * inv_2dt)) @ U_nm1
+    
+    # Résolution du système linéaire A U1 = rhs
     # np.linalg.solve: résout A·x = rhs (système linéaire)
     U1 = np.linalg.solve(A, rhs)
+
+    # Debug print
     if getattr(dbg, 'ENABLED', False):
         dbg.dprint(f"U1: shape={U1.shape}, max={np.nanmax(U1):.3e}, min={np.nanmin(U1):.3e}")
+    
+    # Retour du résultat
     return U1
 
-
-def fournisseur_force_nulle(n: int):
-    """Retourne F(t,k) ≡ 0 (vecteur de taille n)."""
-    def F_zero(_t: float, _k: int) -> np.ndarray:
-        # np.zeros: crée un vecteur de zéros de taille n
-        return np.zeros(n, dtype=float)
-    return F_zero
-
-
+# Génère une force externe localisée (noeud unique) avec enveloppe trapézoïdale.
 def fournisseur_force_localisee(
     N: int,
     i_force: int,
@@ -210,44 +175,27 @@ def fournisseur_force_localisee(
     t_decay: float,
     t0: float = 0.0,
 ):
-    """Génère une force externe localisée (noeud unique) avec enveloppe trapézoïdale.
-
-    Paramètres
-    - N: taille du système (nombre total de DDL)
-    - i_force: indice du nœud où appliquer la force (0 ≤ i_force < N)
-    - F_max: amplitude maximale (Newtons)
-    - t_rise: durée de montée linéaire jusqu'à F_max (s)
-    - t_hold: durée de maintien à F_max (s)
-    - t_decay: durée de décroissance linéaire vers 0 (s)
-    - t0: instant de début de l'enveloppe (décalage temporel, s)
-
-    Retour
-    - Une fonction F(t, k) → ndarray shape (N,), appliquant la force sur i_force.
-
-    Enveloppe (t >= 0):
-      1) 0 → F_max en t_rise (rampe linéaire)
-      2) palier F_max pendant t_hold
-      3) F_max → 0 en t_decay (rampe linéaire)
-      sinon: 0
-
-    Remarques
-    - Les durées nulles sont gérées: si t_rise == 0, le signal saute directement à F_max; idem pour t_decay.
-    - Si i_force est hors bornes, la force sera ignorée (vecteur nul) par sécurité.
-    """
+    
+    # Garantir les types et valeurs corrects
     i_force = int(i_force)
     t_rise = float(max(0.0, t_rise))
     t_hold = float(max(0.0, t_hold))
     t_decay = float(max(0.0, t_decay))
     F_max = float(F_max)
-
     t0 = float(t0)
+
+    # Instants clés de l'enveloppe
     t1 = t_rise
     t2 = t_rise + t_hold
     t3 = t_rise + t_hold + t_decay
 
+    # Définition de l'amplitude en fonction du temps
     def _amp(t: float) -> float:
+
         # Temps relatif à l'instant de début t0
         tr = t - t0
+        
+        # Calcul de l'amplitude selon l'enveloppe trapézoïdale
         if tr < 0.0:
             return 0.0
         if t1 > 0.0 and tr < t1:
@@ -262,42 +210,51 @@ def fournisseur_force_localisee(
         # après t3 (ou t_decay == 0): zéro
         return 0.0
 
+    # Fournisseur de force F(t, k)
     def F(t: float, _k: int) -> np.ndarray:
+
+        # Vecteur force initialisé à zéro
         f = np.zeros(N, dtype=float)
+
+        # Appliquer l'amplitude au noeud i_force
         if 0 <= i_force < N:
             f[i_force] = _amp(float(t))
         return f
 
     return F
 
-
+# Somme de plusieurs fournisseurs de force.
+# La fonction externe fixe N et *Fs, et retourne une fonction F_sum(t, k).
 def somme_de_forces(N: int, *Fs: Callable[[float, int], np.ndarray]):
-    """Combine plusieurs fournisseurs de force F_i(t,k) en une seule force somme.
-
-    Paramètres
-    - N: taille du système (longueur des vecteurs retournés)
-    - *Fs: une ou plusieurs fonctions F_i(t,k) → ndarray shape (N,)
-
-    Retour
-    - F_sum(t,k) = Σ_i F_i(t,k)
-
-    Remarques
-    - Les sorties sont additionnées élément par élément. Aucune saturation n'est appliquée.
-    - On s'attend à ce que chaque F_i retourne un vecteur de taille N.
-    """
+    
+    # Fonction interne F_sum(t, k)
+    # Somme les contributions de chaque fournisseur dans Fs.
     def F_sum(t: float, k: int) -> np.ndarray:
+        
+        # Initialisation du vecteur de sortie avec zéros
         out = np.zeros(N, dtype=float)
+
+        # Itération sur chaque fournisseur et sommation
         for f in Fs:
+
+            # Récupération du vecteur force du fournisseur
+            # .asarray pour assurer le type numpy.ndarray
             vec = np.asarray(f(t, k), dtype=float)
+
+            # Vérification de la dimension avant sommation
             if vec.shape[0] == N:
                 out += vec
             else:
                 # Sécurité: ignorons les vecteurs mal dimensionnés
                 pass
+
+        # Retour du vecteur de sortie avec la somme des forces
         return out
+    
+    # Retour de la fonction somme
     return F_sum
 
-
+# Intégrateur Newmark-beta (β=1/4, γ=1/2) pour M u¨ + C u˙ + K u = F(t).
 def integrer_newmark_beta(
     M: np.ndarray,
     C: np.ndarray,
@@ -309,10 +266,7 @@ def integrer_newmark_beta(
     V0: np.ndarray | None = None,
     A0: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Intègre M u¨ + C u˙ + K u = F(t) par Newmark-beta (β=1/4, γ=1/2) sur les DDL libres.
-
-    Retourne (t, U, V, A) sur l'espace complet (DDLs contraints maintenus à 0).
-
+    """
     Étapes clés et formules:
     - Détection des DDLs contraints (Dirichlet) puis extraction des sous-matrices libres M_ff, C_ff, K_ff.
     - Si A0 non fournie, résolution A0_ff = M_ff^{-1}(F0_ff − C_ff V0_ff − K_ff U0_ff).
@@ -327,28 +281,44 @@ def integrer_newmark_beta(
         A_{k+1}^f = a0(U_{k+1}^f − U_k^f) − a2 V_k^f − a3 A_k^f
         V_{k+1}^f = V_k^f + Δt[(1−γ)A_k^f + γ A_{k+1}^f]
     """
+
+    # Vérifie que dt et t_max sont positifs
     if dt <= 0 or t_max <= 0:
-        raise ValueError("dt e t_max devem ser > 0")
-    if M.shape != C.shape or M.shape != K.shape or M.ndim != 2:
-        raise ValueError("M, C, K devem ser quadradas do mesmo tamanho")
+        raise ValueError("dt et t_max doivent être > 0")
+    
+    # Vérifie que M, C, K sont carrées du même taille
+    # .shape[0] pour nombre de DDLs
+    # .ndim pour vérifier que ce sont des matrices 2D
+    if M.shape != C.shape or M.shape != K.shape or M.ndim != 2 or C.ndim != 2 or K.ndim != 2:
+        raise ValueError("M, C, K doivent être carrées du même taille et 2D")
 
-    n = M.shape[0]
-    n_steps = int(np.floor(t_max / dt)) + 1
-    t = np.linspace(0.0, dt * (n_steps - 1), n_steps)
+    # Vérifie que F est soit une fonction, soit un tableau numpy
+    # callable() pour fonctions
+    # isinstance(..., np.ndarray) pour tableaux numpy
+    if not (callable(F) or isinstance(F, np.ndarray)):
+        raise ValueError("F doit être une fonction ou un tableau numpy")
+    
+    # Initialisations
+    n = M.shape[0]                                      # Nombre de DDLs
+    n_steps = int(np.floor(t_max / dt)) + 1             # Nombre de pas de temps
+    t = np.linspace(0.0, dt * (n_steps - 1), n_steps)   # Vecteur temps
 
-    constrained = detecter_ddl_contraints_mk(M, K)
-    free = np.setdiff1d(np.arange(n), constrained)
-    if free.size == 0:
-        raise ValueError("Nenhum GL livre detectado para integração Newmark")
+    # Détection des DDLs contraints et extraction des sous-matrices libres
+    constrained = detecter_ddl_contraints_mk(M, K)      # Indices des DDLs contraints
+    free = np.setdiff1d(np.arange(n), constrained)      # Indices des DDLs libres
+    if free.size == 0:                                  # Vérification des DDLs libres
+        raise ValueError("Aucun DDL libre détecté pour l'intégration Newmark")
 
-    Mff = M[np.ix_(free, free)]
-    Cff = C[np.ix_(free, free)]
-    Kff = K[np.ix_(free, free)]
+    # Extraction des sous-matrices libres
+    Mff = M[np.ix_(free, free)]                         # Sous-matrice libre de M
+    Kff = K[np.ix_(free, free)]                         # Sous-matrice libre de K
+    Cff = C[np.ix_(free, free)]                         # Sous-matrice libre de C
 
+    # Conditions initiales pour DDLs libres
     U0f = np.zeros(free.size, dtype=float) if U0 is None else np.asarray(U0, dtype=float)[free]
     V0f = np.zeros(free.size, dtype=float) if V0 is None else np.asarray(V0, dtype=float)[free]
-    if A0 is None:
-        if callable(F):
+    if A0 is None:                                      # Calculer A0f si non fourni
+        if callable(F):                                 # F est une fonction    
             F0_full = np.asarray(F(0.0, 0), dtype=float).reshape(n)
         else:
             F_arr = np.asarray(F, dtype=float)
