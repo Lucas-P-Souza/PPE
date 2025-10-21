@@ -1,7 +1,12 @@
 from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy, QPushButton
 from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 import math
-from corde_widget import CordeWidget
+try:
+    # import relatif lorsqu'on utilise le package
+    from .corde_widget import CordeWidget
+except Exception:
+    # fallback pour exécution directe du fichier (sans package)
+    from corde_widget import CordeWidget
 try:
     # integração com o back-end (controlador de simulação)
     from digital_twin.back_end.integration import SimulationController, SimSettings  # type: ignore
@@ -29,7 +34,11 @@ except Exception:
                 except Exception: pass
             self._running = False
 
-from settings_dialog import SettingsDialog
+try:
+    from .settings_dialog import SettingsDialog
+except Exception:
+    # fallback pour exécution directe du fichier (sans package)
+    from settings_dialog import SettingsDialog
 
 # cette classe gère la fenêtre principale de l'application
 class MainWindow(QMainWindow):
@@ -132,7 +141,7 @@ class MainWindow(QMainWindow):
 
         # informations (utilise QSS #InfoLabel)
         self.info_label = QLabel(
-            "1..9,0,-,= → cases 1..12 (dans la maison, près de la frette)  |  Flèches : curseur d’attaque (1 % par pas)  |  ↑ gauche • ↓ droite (attaque)  |  A/D ou Num4/6 : curseur de note  |  Espace : pincer"
+            "1..9,0,-,= → cases 1..12 (dans la maison, près de la frette)  |  Flèches ←/→ : curseur d’attaque (1 % par pas)  |  A/D ou Num4/6 : curseur de note  |  ↑ : pincer"
         )
         self.info_label.setObjectName("InfoLabel")
         self.info_label.setAlignment(Qt.AlignCenter)
@@ -144,9 +153,15 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("StatusLabel")
         self.status_label.setAlignment(Qt.AlignCenter)
         self._last_pluck = None  # garde l'état du dernier pincement
+        self._last_press = None  # garde l'état du dernier "press" (touche W)
         self._pluck_timer = QTimer(self)
         self._pluck_timer.setSingleShot(True)
         self._pluck_timer.timeout.connect(self._clear_pluck)
+    # NOTE: 'press' (W) will be active while the key is held; cleared on release
+        # timer utilisé enquanto a seta ↑ estiver pressionada (aciona la simulation répétée)
+        self._pluck_hold_timer = QTimer(self)
+        self._pluck_hold_timer.setInterval(300)  # interval en ms; ajustable
+        self._pluck_hold_timer.timeout.connect(self._on_pluck_hold_tick)
 
         # ça crée le layout principal vertical avec centralisation horizontale du conteneur
         layout = QVBoxLayout()
@@ -262,19 +277,7 @@ class MainWindow(QMainWindow):
         self.corde_widget.set_cursor_fret_line(target_line)
         self._update_cursor_status()
 
-    def _step_fret_line_strike(self, direction: int) -> None:
-        # parcoure les lignes de frettes (0..12) pour le CURSEUR D'ATTAQUE
-        pos = self.corde_widget.strike_cursor_pos
-        cur = int(round(self._raw_f_from_pos(pos)))
-        target_line = self._clamp_line(cur + (1 if direction > 0 else -1))
-        try:
-            frac = self.corde_widget._fret_line_frac(target_line)
-        except Exception:
-            # fallback: utiliser set_cursor_fret_line sur le curseur principal puis recopier la fraction
-            self.corde_widget.set_cursor_fret_line(target_line)
-            frac = self.corde_widget.cursor_pos
-        self.corde_widget.set_strike_cursor_pos(frac)
-        self._update_cursor_status()
+    # NOTE: Removed Up/Down-specific helpers for the attack cursor (per user request).
 
     def _step_house_center(self, direction: int) -> None:
         # parcourt les centres des maisons (0..12) pour le CURSEUR DE NOTE
@@ -303,39 +306,7 @@ class MainWindow(QMainWindow):
             self.corde_widget.set_cursor_house_center(prev_idx)
             self._update_cursor_status(house=prev_idx)
 
-    def _step_house_center_strike(self, direction: int) -> None:
-        # parcourt les centres des maisons (0..12) pour le CURSEUR D'ATTAQUE
-        pos = self.corde_widget.strike_cursor_pos
-        centers = [0.0] + [self.corde_widget.house_center_frac(h) for h in range(1, 13)]
-        eps = 1e-6
-
-        if direction > 0:
-            next_idx = None
-            for i, c in enumerate(centers):
-                if c > pos + eps:
-                    next_idx = i
-                    break
-            if next_idx is None:
-                next_idx = 12
-            # maison 0 -> 0.0 ; autres -> centre correspondant
-            if next_idx <= 0:
-                self.corde_widget.set_strike_cursor_pos(0.0)
-            else:
-                self.corde_widget.set_strike_cursor_pos(self.corde_widget.house_center_frac(next_idx))
-            self._update_cursor_status()
-        else:
-            prev_idx = None
-            for i in range(12, -1, -1):
-                if centers[i] < pos - eps:
-                    prev_idx = i
-                    break
-            if prev_idx is None:
-                prev_idx = 0
-            if prev_idx <= 0:
-                self.corde_widget.set_strike_cursor_pos(0.0)
-            else:
-                self.corde_widget.set_strike_cursor_pos(self.corde_widget.house_center_frac(prev_idx))
-            self._update_cursor_status()
+    # NOTE: _step_house_center_strike removed — Up/Down behavior eliminated.
 
     def _snap_left_line(self) -> None:
         # snap à la frette de gauche (CURSEUR DE NOTE)
@@ -353,31 +324,9 @@ class MainWindow(QMainWindow):
         self.corde_widget.set_cursor_fret_line(target_line)
         self._update_cursor_status()
 
-    def _snap_left_line_strike(self) -> None:
-        # snap à la frette de gauche (CURSEUR D'ATTAQUE)
-        pos = self.corde_widget.strike_cursor_pos
-        cur = int(round(self._raw_f_from_pos(pos)))
-        target_line = self._clamp_line(max(cur - 1, 0))
-        try:
-            frac = self.corde_widget._fret_line_frac(target_line)
-        except Exception:
-            self.corde_widget.set_cursor_fret_line(target_line)
-            frac = self.corde_widget.cursor_pos
-        self.corde_widget.set_strike_cursor_pos(frac)
-        self._update_cursor_status()
+    # NOTE: _snap_left_line_strike removed.
 
-    def _snap_right_line_strike(self) -> None:
-        # snap à la frette de droite (CURSEUR D'ATTAQUE)
-        pos = self.corde_widget.strike_cursor_pos
-        cur = int(round(self._raw_f_from_pos(pos)))
-        target_line = self._clamp_line(min(cur + 1, 12))
-        try:
-            frac = self.corde_widget._fret_line_frac(target_line)
-        except Exception:
-            self.corde_widget.set_cursor_fret_line(target_line)
-            frac = self.corde_widget.cursor_pos
-        self.corde_widget.set_strike_cursor_pos(frac)
-        self._update_cursor_status()
+    # NOTE: _snap_right_line_strike removed.
 
     def keyPressEvent(self, event):
         # gère les événements clavier pour interagir avec la corde
@@ -406,16 +355,7 @@ class MainWindow(QMainWindow):
                 self._arrow_timer.stop()
             return
 
-    # magnétisation pour lignes de frette (désormais pour le CURSEUR D'ATTAQUE): ↑ frette de gauche, ↓ frette de droite
-        if qt_key in (Qt.Key_Up, Qt.Key_Down):
-            try:
-                if qt_key == Qt.Key_Up:
-                    self._snap_left_line_strike()
-                else:
-                    self._snap_right_line_strike()
-                return
-            except Exception:
-                pass
+    # (Up/Down keys removed — no action assigned)
 
     # ligne supérieure: 1..9,0,-,=  -> cases 1..12 (placer DANS la maison, proche de la frette cible)
         mapping = {
@@ -441,61 +381,30 @@ class MainWindow(QMainWindow):
             self._update_cursor_status()
             return
 
-        # espace: signale "pincer/attaque"
-        if qt_key == Qt.Key_Space:
+    # Flèche HAUT : signale "pincer/attaque" (remplacé Espace)
+        if qt_key == Qt.Key_Up:
+            # ignorer auto-repeat (mais permettre hold via timer)
+            if event.isAutoRepeat():
+                return
+            # marquer le pincer et démarrer un timer répétitif para hold
             self._last_pluck = "✔"
             self._update_cursor_status()
-            # démarrer un timer pour effacer l'état de pincer après 500 ms
+            # afficher estado temporário imediato
             self._pluck_timer.start(500)
-            # --- déclenche aussi la simulation back-end ---
-            try:
-                note_pct = float(self.corde_widget.cursor_pos) * 100.0
-                pluck_pct = float(self.corde_widget.strike_cursor_pos) * 100.0
-                # indice de nœud le plus proche pour retour terminal
-                try:
-                    node_note = self.corde_widget.nearest_node_index(self.corde_widget.cursor_pos)
-                except Exception:
-                    node_note = None
-                try:
-                    node_strike = self.corde_widget.nearest_node_index(self.corde_widget.strike_cursor_pos)
-                except Exception:
-                    node_strike = None
-                # índice de elemento e posição em metros
-                try:
-                    elem_note = self.corde_widget.nearest_element_index(self.corde_widget.cursor_pos)
-                    x_note = self.corde_widget.frac_to_meters(self.corde_widget.cursor_pos)
-                except Exception:
-                    elem_note, x_note = None, None
-                try:
-                    elem_strike = self.corde_widget.nearest_element_index(self.corde_widget.strike_cursor_pos)
-                    x_strike = self.corde_widget.frac_to_meters(self.corde_widget.strike_cursor_pos)
-                except Exception:
-                    elem_strike, x_strike = None, None
-                # lança simulação em background; ignora se já houver uma em curso
-                self.sim_ctrl.trigger(
-                    note_cursor_pos_percent=note_pct,
-                    pluck_cursor_pos_percent=pluck_pct,
-                    excited=True,
-                )
-                # --- feedback terminal ---
-                try:
-                    note_info = f"Nœud {node_note}, Élément {elem_note}, x={x_note:.3f} m" if (node_note is not None and elem_note is not None and x_note is not None) else None
-                except Exception:
-                    note_info = None
-                try:
-                    strike_info = f"Nœud {node_strike}, Élément {elem_strike}, x={x_strike:.3f} m" if (node_strike is not None and elem_strike is not None and x_strike is not None) else None
-                except Exception:
-                    strike_info = None
-                if note_info and strike_info:
-                    print(f"Espace détecté: Note = {note_pct:.1f}% ({note_info}), Pincer = {pluck_pct:.1f}% ({strike_info})")
-                elif note_info:
-                    print(f"Espace détecté: Note = {note_pct:.1f}% ({note_info}), Pincer = {pluck_pct:.1f}%")
-                elif strike_info:
-                    print(f"Espace détecté: Note = {note_pct:.1f}%, Pincer = {pluck_pct:.1f}% ({strike_info})")
-                else:
-                    print(f"Espace détecté: Note = {note_pct:.1f}%, Pincer = {pluck_pct:.1f}%")
-            except Exception:
-                pass
+            # démarrer le timer de hold si pas déjà actif
+            if not self._pluck_hold_timer.isActive():
+                # déclencher immédiatement une première fois
+                self._on_pluck_hold_tick()
+                self._pluck_hold_timer.start()
+            return
+
+        # Touche W : signale un "press" (indicateur séparé)
+        if qt_key == Qt.Key_W:
+            # ignorar auto-repeat; ativar enquanto W estiver pressionada
+            if event.isAutoRepeat():
+                return
+            self._last_press = "✔"
+            self._update_cursor_status()
             return
 
         if qt_key == Qt.Key_Escape:
@@ -525,6 +434,23 @@ class MainWindow(QMainWindow):
                 self._arrow_timer.stop()
             elif new_dir != 0 and not self._arrow_timer.isActive():
                 self._arrow_timer.start()
+            return
+        # arrêt du hold timer pour Flèche HAUT si relâchée
+        if qt_key == Qt.Key_Up:
+            if self._pluck_hold_timer.isActive():
+                self._pluck_hold_timer.stop()
+            # effacer l'état de pincer
+            try:
+                self._clear_pluck()
+            except Exception:
+                pass
+            return
+        # relâchement de W -> effacer press
+        if qt_key == Qt.Key_W:
+            try:
+                self._clear_press()
+            except Exception:
+                pass
             return
         super().keyReleaseEvent(event)
 
@@ -566,14 +492,20 @@ class MainWindow(QMainWindow):
 
         attaque_txt = f"Attaque: {int(s_pos*100)}%"
         pluck_txt = f"Pincer: {self._last_pluck or '—'}"
+        press_txt = f"Press: {self._last_press or '—'}"
         self.status_label.setText(
             f"{curseur_txt}  |  Élément: {elem_idx}  |  Nœud: {node_idx}  |  x≈{x_m:.3f} m  |  "
-            f"{attaque_txt}  |  Élément: {elem_idx_s}  |  Nœud: {node_idx_s}  |  x≈{x_m_s:.3f} m  |  {pluck_txt}"
+            f"{attaque_txt}  |  Élément: {elem_idx_s}  |  Nœud: {node_idx_s}  |  x≈{x_m_s:.3f} m  |  {pluck_txt}  |  {press_txt}"
         )
 
     def _clear_pluck(self):
         # remet l'état de pincer à inactif
         self._last_pluck = None
+        self._update_cursor_status()
+
+    def _clear_press(self):
+        # remet l'état 'press' à inactif
+        self._last_press = None
         self._update_cursor_status()
 
     def _on_arrow_tick(self):
@@ -583,6 +515,19 @@ class MainWindow(QMainWindow):
         step = 0.01 * (1 if self._arrow_direction > 0 else -1)
         self.corde_widget.move_strike_cursor(step)
         self._update_cursor_status()
+
+    def _on_pluck_hold_tick(self):
+        # appelé périodiquement pendant que la flèche HAUT est maintenue
+        try:
+            note_pct = float(self.corde_widget.cursor_pos) * 100.0
+            pluck_pct = float(self.corde_widget.strike_cursor_pos) * 100.0
+            self.sim_ctrl.trigger(
+                note_cursor_pos_percent=note_pct,
+                pluck_cursor_pos_percent=pluck_pct,
+                excited=True,
+            )
+        except Exception:
+            pass
 
     # --- slots Qt para atualizar UI no thread principal ---
     def _on_sim_started(self) -> None:

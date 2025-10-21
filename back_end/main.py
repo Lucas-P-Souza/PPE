@@ -56,7 +56,7 @@ except ModuleNotFoundError:
         calculer_energies_dans_le_temps,
     )
 
-def main() -> None:
+def main1() -> None:
 
     # Définir le chemin racine du projet pour les sorties
     ROOT = Path(__file__).resolve().parents[2]
@@ -538,6 +538,8 @@ def main() -> None:
             show_legend=_snap_show_legend,
         )
 
+def main() -> None:
+    # main para rodar em real time
 
 if __name__ == "__main__":
     main()

@@ -1,8 +1,21 @@
 import sys
 import os
+from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication
-from digital_twin.front_end.gui import MainWindow
+# Tentative d'import de la fenêtre principale via le package.
+# Si l'exécution se fait en lançant directement ce fichier depuis
+# le dossier `digital_twin`, Python ne trouve pas le package
+# racine — on ajoute alors la racine du dépôt au sys.path.
+try:
+    from digital_twin.front_end.gui import MainWindow
+except ModuleNotFoundError:
+    # Exécution directe (cwd == digital_twin) — ajouter le parent du
+    # dossier `digital_twin` au sys.path pour que l'import fonctionne.
+    ROOT = Path(__file__).resolve().parents[2]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from digital_twin.front_end.gui import MainWindow
 
 class AudioManager:
     def play_note(self, note_name):
