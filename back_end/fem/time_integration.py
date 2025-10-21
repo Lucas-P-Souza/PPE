@@ -332,10 +332,20 @@ def integrer_newmark_beta(
             Fk1 = Fk1_full[free]
 
         else:
+
+            # F est un tableau numpy
+            # .asarray pour assurer le type numpy.ndarray
             F_arr = np.asarray(F, dtype=float)
+
+            # Extraire F_{k+1} ou zéro si non disponible
+            # .ndim pour vérifier la dimension
+            # .shape[1] pour vérifier le nombre de colonnes
             if F_arr.ndim == 2 and F_arr.shape[1] > k + 1:
                 Fk1 = F_arr[free, k + 1]
             else:
+
+                # Initialiser à zéro si non disponible
+                # .zeros pour initialiser à zéro
                 Fk1 = np.zeros(free.size, dtype=float)
 
         # Calcul du second membre et résolution pour U_{k+1}^f
