@@ -1,19 +1,23 @@
 from __future__ import annotations
-
 from pathlib import Path
 import numpy as np
 
-# Try package imports first; if running the script directly (no package on sys.path),
-# add the repository root to sys.path once and re-run the imports. This keeps
-# in-repo direct execution working while avoiding pervasive sys.path shims.
+# Tentative d'importation normale (exécution via package)
 try:
-    from digital_twin.back_end import config as _cfg  # type: ignore
+    from digital_twin.back_end import config as _cfg  
+    from digital_twin.back_end.utils.validators import valider_mck  
+    from digital_twin.back_end.io import enregistrer_deplacement_csv  
+    from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press
+    from digital_twin.back_end.audio.generate_audio_from_positions import generate_multiple_positions_audio
+    from digital_twin.back_end.fem.modal import (
+        detecter_ddl_contraints_mk,
+        calculer_frequences_et_modes,
+    )
     from digital_twin.back_end.fem.formulation import (
         build_global_mkc_from_config,
         build_node_positions_from_config,
         amortissement_rayleigh,
-    )  # type: ignore
-    from digital_twin.back_end.utils.validators import valider_mck  # type: ignore
+    )
     from digital_twin.back_end.fem.time_integration import (
         definir_parametres_simulation,
         calculer_u1,
@@ -21,28 +25,28 @@ try:
         somme_de_forces,
         integrer_newmark_beta,
         calculer_energies_dans_le_temps,
-    )  # type: ignore
-    from digital_twin.back_end.fem.modal import (
-        detecter_ddl_contraints_mk,
-        calculer_frequences_et_modes,
-    )  # type: ignore
-    from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
-    from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
-    from digital_twin.back_end.audio.generate_audio_from_positions import generate_multiple_positions_audio
+    )
+
+# Si l'importation échoue (exécution directe), ajuster le sys.path
 except ModuleNotFoundError:
-    # Running module as script from within the package folder (e.g. cwd==digital_twin)
-    # — add repo root (two levels up) to sys.path and import again.
     import sys as _sys
     ROOT = Path(__file__).resolve().parents[2]
     if str(ROOT) not in _sys.path:
         _sys.path.insert(0, str(ROOT))
-    from digital_twin.back_end import config as _cfg  # type: ignore
+    from digital_twin.back_end import config as _cfg
+    from digital_twin.back_end.utils.validators import valider_mck  
+    from digital_twin.back_end.io import enregistrer_deplacement_csv
+    from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press
+    from digital_twin.back_end.audio.generate_audio_from_positions import generate_multiple_positions_audio
+    from digital_twin.back_end.fem.modal import (
+        detecter_ddl_contraints_mk,
+        calculer_frequences_et_modes,
+    )
     from digital_twin.back_end.fem.formulation import (
         build_global_mkc_from_config,
         build_node_positions_from_config,
         amortissement_rayleigh,
-    )  # type: ignore
-    from digital_twin.back_end.utils.validators import valider_mck  # type: ignore
+    )
     from digital_twin.back_end.fem.time_integration import (
         definir_parametres_simulation,
         calculer_u1,
@@ -50,61 +54,78 @@ except ModuleNotFoundError:
         somme_de_forces,
         integrer_newmark_beta,
         calculer_energies_dans_le_temps,
-    )  # type: ignore
-    from digital_twin.back_end.fem.modal import (
-        detecter_ddl_contraints_mk,
-        calculer_frequences_et_modes,
-    )  # type: ignore
-    from digital_twin.back_end.io import enregistrer_deplacement_csv  # type: ignore
-    from digital_twin.back_end.interactions.press import PressEvent, simulate_with_press  # type: ignore
-    from digital_twin.back_end.audio.generate_audio_from_positions import generate_multiple_positions_audio
-
+    )
 
 def main() -> None:
+
+    # Définir le chemin racine du projet pour les sorties
     ROOT = Path(__file__).resolve().parents[2]
 
-    # ==============================================
-    # SECTION 1 — CALCUL : Assemblage de M, C, K et validation
-    # (Aucun tracé ici ; uniquement la construction numérique)
-    # ==============================================
+    # ====================================================================
+    #       SECTION 1 — CALCUL : Assemblage de M, C, K et validation
+    #       (Aucun tracé ici ; uniquement la construction numérique)
+    # ====================================================================
+    
     # Assemblage de M, K, C depuis la configuration (maillage des frettes requis)
     res = build_global_mkc_from_config(apply_fixed_bc=True, return_meta=True)
+    
+    # Vérifier le format de retour
     if not (isinstance(res, tuple) and len(res) >= 3):
+        # Si le format est incorrect, lever une erreur explicite et casser l'exécution
         raise RuntimeError("Retour inattendu de build_global_mkc_from_config")
+    
+    # Déballer les matrices et les méta-données
     if len(res) == 4:
         M, K, C, meta = res
+    # En cas d'absence de méta-données, initialiser un dictionnaire vide
     else:
         M, K, C = res[:3]
-        meta = {}
+        meta = {}           # juste pour typer correctement
+
+    # Debug: afficher un message si activé
     if getattr(_cfg, "DEBUG_ENABLED", False):
         print("[INFO] Matrices assemblées depuis la configuration.")
 
     # Validate shapes, symmetry and boundary conditions
     valider_mck(M, C, K, verbose=True)
 
-    # ==============================================
-    # SECTION 2 — CALCUL : Paramètres de simulation
-    # ==============================================
-    # Paramètres de simulation
-    delta_t = float(getattr(_cfg, "DT", 1e-4))
-    nos_press = [6, 11, 17, 21, 25, 29, 34, 38, 41, 44, 48, 51]
-    #nos_press = [6]
-    dur_press = 1  # duração da pressão em cada nó
-    # Inserir 1s de pausa antes do primeiro press (solicitado)
-    t0 = 1.0
+    # =========================================================
+    #       SECTION 2 — CALCUL : Paramètres de simulation
+    # =========================================================
+
+    # Paramètres pour la simulation temporelle
+    delta_t = float(getattr(_cfg, "DT", 1e-4))                      # pas de temps
+    nos_press = [6, 11, 17, 21, 25, 29, 34, 38, 41, 44, 48, 51]     # nœuds à presser successivement
+    dur_press = 1                                                   # durée de la pression à chaque nœud
+    t0 = 1.0                                                        # temps de début du premier press
+    ti = 1.0                                                        # délai entre press et pincement
+    tp = 1.0                                                        # temps de pause entre press
+
+    # Initialiser les listes d'événements de pression et des temps d'excitation
     exc_times = []
     press_events = []
+
+    # Construire les événements de pression et les temps d'excitation
     for idx, node_press in enumerate(nos_press, start=1):
-        t_press_on = t0
-        t_pinc = t_press_on + 0.1  # pincamento logo após pressionar
-        t_press_off = t_press_on + dur_press
-        exc_times.append(t_pinc)
+
+        # Temps d'activation et de désactivation de la pression
+        t_press_on = t0                         # début de la pression
+        t_pinc = t_press_on + ti                # pincement juste après pression
+        t_press_off = t_press_on + dur_press    # fin de la pression
+
+        # Ajouter le temps de pincement à la liste des excitations
+        exc_times.append(t_pinc)                # pincement à ce temps
+
+        # Créer et ajouter l'événement de pression à la liste
         press_events.append(PressEvent(node=node_press, t_on=t_press_on, t_off=t_press_off, ks=5e4, cs=0.0))
-        # Após o 6º press (idx == 6) adicionar 1s extra de pausa antes do próximo press
+
+        # Après le 6ème press (idx == 6) ajouter 1s extra de pause avant le prochain press
         if idx == 6:
-            t0 = t_press_off + 1.0
+            t0 = t_press_off + tp # pause supplémentaire avant le prochain press
         else:
-            t0 = t_press_off  # próximo nó pressionado imediatamente após soltar o anterior
+            t0 = t_press_off  # prochain nœud pressé immédiatement après avoir relâché le précédent
+    
+    # Durée totale de la simulation (incluant tous les press et pincements)
     T_total = t0 + 0.5
     definir_parametres_simulation(delta_t, T_total)
 
